@@ -27,19 +27,19 @@ terminal result, and writes the result as step outputs.
 > together. It accepts no contributions — pull requests are closed by policy,
 > and support and source live in the monorepo.
 
-The repository is configured at creation with pushes restricted to the
-release workflow's identity (branch ruleset on `main`), a tag ruleset
-protecting published versions, and Issues, Projects, Wiki, and Discussions
-disabled. Verify against the repository settings rather than trusting this
-paragraph: the enforcement lives there, not in this tree.
+Repository access restrictions, branch and tag protection, and feature
+availability are managed in GitHub repository settings, not enforced by this
+source tree. Do not assume those protections are configured; verify the
+repository settings directly.
 
 ## Authentication
 
 The `run` action authenticates with a per-job **GitHub OIDC token** — there is
 no Macroscope API key or secret to store, rotate, or leak. The job grants
 `id-token: write`; the action mints the token and Macroscope verifies its
-claims against a repo-level trust policy (default deny — a repo admin enables
-the integration in Macroscope settings).
+claims against a repo-level trust policy. GitHub Actions agent runs default
+to enabled for existing and new repository settings; a repo admin can disable
+the integration in Macroscope settings.
 
 ```yaml
 permissions:
