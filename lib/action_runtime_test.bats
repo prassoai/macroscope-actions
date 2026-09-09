@@ -27,6 +27,17 @@ teardown() {
   [ "$output" = "valuewithcr" ]
 }
 
+# Requirement: scalar outputs cannot forge later output assignments by placing
+# CR/LF in their value or name.
+@test "emit_scalar strips line breaks and rejects unsafe names" {
+  emit_scalar verdict $'success\nforged=value'
+  [ "$(cat "$GITHUB_OUTPUT")" = "verdict=successforged=value" ]
+
+  run emit_scalar $'bad
+name' value
+  [ "$status" -ne 0 ]
+}
+
 # Requirement: a multiline value round-trips through the random heredoc
 # delimiter verbatim — including a value that contains a plausible delimiter
 # line, which must not terminate the block early.

@@ -15,9 +15,9 @@ so branch protection reads your job's conclusion directly, and any event is a
 valid trigger: `pull_request`, `push`, `schedule`, `release`,
 `workflow_dispatch`, `workflow_run`.
 
-> **This repository currently ships the groundwork** — the shared, unit-tested
-> shell library the actions are built from ([`lib/`](./lib)). The `run` action
-> lands with the Macroscope trigger API that backs it.
+The `run` action is the supported workflow entry point. It mints GitHub OIDC,
+starts or rejoins one durable Macroscope run, polls until the server returns a
+terminal result, and writes the result as step outputs.
 
 ## Governance
 
@@ -51,6 +51,102 @@ permissions:
 A `permissions:` map is **closed** — every scope it does not list is revoked —
 so `id-token: write` must be present. Without it the action fails immediately,
 naming the missing scope.
+
+## Usage
+
+Full-diff agents pass an explicit `base`:
+
+```yaml
+name: Macroscope Release Audit
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - id: macroscope
+        uses: prassoai/macroscope-actions/run@<sha> # v1
+        with:
+          repository: ${{ github.repository }}
+          agent: Release Audit
+          commit: ${{ github.event.pull_request.head.sha }}
+          base: ${{ github.event.pull_request.base.sha }}
+          fail-on: failure
+          timeout: "1800"
+          additional-instructions: |
+            Focus on release-blocking regressions.
+```
+
+PR metadata agents pass `pull-request` instead:
+
+```yaml
+name: Macroscope PR Metadata
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  pr-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - id: macroscope
+        uses: prassoai/macroscope-actions/run@<sha> # v1
+        with:
+          repository: ${{ github.repository }}
+          agent: PR Metadata Audit
+          commit: ${{ github.event.pull_request.head.sha }}
+          pull-request: ${{ github.event.pull_request.number }}
+```
+
+## Inputs
+
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `api-url` | no | `https://hooks.macroscope.com` | HTTPS Macroscope control plane URL. |
+| `repository` | yes | | Repository in `owner/name` form; must match GitHub OIDC claims. |
+| `agent` | yes | | Agent title under `.macroscope/check-run-agents/github-actions/`. |
+| `commit` | no | `${{ github.sha }}` | Target commit SHA. |
+| `base` | no | | Base commit SHA for diff-shaped inputs. |
+| `pull-request` | no | | Pull request number for PR metadata inputs and PR-scoped tools. |
+| `fail-on` | no | `failure` | `failure`, `neutral`, or `never`. |
+| `timeout` | no | `1800` | Maximum seconds to wait for a terminal result. |
+| `additional-instructions` | no | | Extra prompt text, capped at 16 KiB. |
+
+## Outputs
+
+| Output | Description |
+| --- | --- |
+| `run-id` | Durable Macroscope run ID. Written once start succeeds. |
+| `verdict` | Terminal verdict: `success`, `neutral`, or `failure`. |
+| `summary` | Terminal agent summary. |
+| `findings` | Terminal findings reference. |
+| `cost-usd` | Raw inference cost rendered as USD. |
+
+## Runtime behavior
+
+Polling is the execution lease. While the backend reports `pending` or
+`running`, each poll renews the lease; if the workflow is cancelled or the
+runner dies, polling stops and Macroscope lapses the run server-side. The
+action retries transport failures, server errors, `429`, and rate-limited
+`403` responses within the remaining timeout budget.
+
+`fail-on` maps the terminal result to the step exit status. `failure` fails
+only on a failed or absent verdict, `neutral` also fails on neutral, and
+`never` leaves the step green for agent outcomes and timeouts. Terminal outputs
+are written before any fail-on failure so `if: always()` consumers can inspect
+the result.
 
 ## Versioning / pinning
 

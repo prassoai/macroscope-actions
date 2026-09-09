@@ -1,0 +1,68 @@
+name: Macroscope Run
+description: Run one Macroscope GitHub Actions agent and expose its result.
+inputs:
+  api-url:
+    description: Macroscope HTTPS API base URL.
+    required: false
+    default: https://hooks.macroscope.com
+  repository:
+    description: GitHub repository in owner/name form.
+    required: true
+  agent:
+    description: Agent title under .macroscope/check-run-agents/github-actions/.
+    required: true
+  commit:
+    description: Target commit SHA.
+    required: false
+    default: ${{ github.sha }}
+  base:
+    description: Optional base commit SHA for diff inputs.
+    required: false
+  pull-request:
+    description: Optional pull request number for PR metadata inputs.
+    required: false
+  fail-on:
+    description: "Step failure policy: failure, neutral, or never."
+    required: false
+    default: failure
+  timeout:
+    description: Maximum seconds to wait for a terminal Macroscope result.
+    required: false
+    default: "1800"
+  additional-instructions:
+    description: Optional run-specific instructions appended to the agent prompt.
+    required: false
+outputs:
+  run-id:
+    description: Durable Macroscope run ID.
+    value: ${{ steps.run.outputs.run-id }}
+  verdict:
+    description: Terminal agent verdict.
+    value: ${{ steps.run.outputs.verdict }}
+  summary:
+    description: Terminal agent summary.
+    value: ${{ steps.run.outputs.summary }}
+  findings:
+    description: Terminal findings reference.
+    value: ${{ steps.run.outputs.findings }}
+  cost-usd:
+    description: Terminal raw inference cost in USD.
+    value: ${{ steps.run.outputs.cost-usd }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        IN_API_URL: ${{ inputs.api-url }}
+        IN_REPOSITORY: ${{ inputs.repository }}
+        IN_AGENT: ${{ inputs.agent }}
+        IN_COMMIT: ${{ inputs.commit || github.sha }}
+        IN_BASE: ${{ inputs.base }}
+        IN_PULL_REQUEST: ${{ inputs.pull-request }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_TIMEOUT: ${{ inputs.timeout }}
+        IN_ADDITIONAL_INSTRUCTIONS: ${{ inputs.additional-instructions }}
+        IN_POLL_INTERVAL: "5"
+        IN_ACTION_VERSION: v1
+      run: ${{ github.action_path }}/run.sh

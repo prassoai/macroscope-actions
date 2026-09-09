@@ -24,6 +24,15 @@ strip_crlf() {
   printf '%s' "${s//$'\r'/}"
 }
 
+# emit_scalar writes one CR/LF-stripped scalar output. Output names are held to
+# the same safe character set as emit_multiline because the name is part of
+# $GITHUB_OUTPUT's assignment framing.
+emit_scalar() {
+  local name=$1 value=$2
+  case "$name" in '' | *[!A-Za-z0-9_-]*) return 1 ;; esac
+  printf '%s=%s\n' "$name" "$(strip_crlf "$value")" >>"$GITHUB_OUTPUT"
+}
+
 # emit_multiline writes a multiline output value with a random heredoc
 # delimiter, so a value that happens to contain a fixed delimiter (or tries to
 # guess one) cannot terminate the block early and forge further outputs.
