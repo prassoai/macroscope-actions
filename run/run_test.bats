@@ -89,7 +89,7 @@ failure_body() {
 
 # Requirement: a successful terminal run emits every public output after a
 # lease-renewing poll.
-@test "terminal success emits run ID verdict summary findings and cost" {
+@test "terminal success emits run ID verdict summary and cost without findings" {
   enqueue_response 200 "$(oidc_body)"
   enqueue_response 202 "$(start_body)"
   enqueue_response 202 "$(running_body)" $'Retry-After: 0\r\n'
@@ -102,7 +102,21 @@ failure_body() {
   grep -q '^verdict=success$' "$GITHUB_OUTPUT"
   grep -q '^cost-usd=1.23456$' "$GITHUB_OUTPUT"
   grep -q 'summary<<ghadelim_' "$GITHUB_OUTPUT"
-  grep -q 'findings<<ghadelim_' "$GITHUB_OUTPUT"
+  ! grep -q '^findings' "$GITHUB_OUTPUT"
+}
+
+@test "internal findings reference is ignored regardless of presence or type" {
+  for body in \
+    '{"status":"succeeded","verdict":"success","rawCostCentimills":0}' \
+    '{"status":"succeeded","verdict":"success","rawCostCentimills":0,"findingsReference":null}' \
+    '{"status":"succeeded","verdict":"success","rawCostCentimills":0,"findingsReference":{"internal":true}}'; do
+    printf '%s' "$body" > "$MOCK_CALLS"
+    run valid_poll_response "$MOCK_CALLS"
+    [ "$status" -eq 0 ]
+    run emit_terminal_outputs "$MOCK_CALLS"
+    [ "$status" -eq 0 ]
+    ! grep -q '^findings' "$GITHUB_OUTPUT"
+  done
 }
 
 # Requirement: Macroscope start and poll requests identify the action client

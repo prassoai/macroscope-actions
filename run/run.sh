@@ -181,7 +181,6 @@ valid_poll_response() {
     and ((.reason | type == "string") or (.reason == null))
     and ((.verdict | type == "string") or (.verdict == null))
     and ((.summary | type == "string") or (.summary == null))
-    and ((.findingsReference | type == "string") or (.findingsReference == null))
     and ((.status != "succeeded") or (.verdict == "success" or .verdict == "neutral" or .verdict == "failure"))
   ' "$1" >/dev/null
 }
@@ -215,7 +214,6 @@ emit_terminal_outputs() {
   cost=$(cost_usd "$(jq -r '.rawCostCentimills' "$body")") || return 1
   emit_scalar verdict "$(jq -r '.verdict // ""' "$body")"
   emit_multiline summary "$(jq -r '.summary // ""' "$body")"
-  emit_multiline findings "$(jq -r '.findingsReference // ""' "$body")"
   emit_scalar cost-usd "$cost"
 }
 

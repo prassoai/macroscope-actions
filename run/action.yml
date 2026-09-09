@@ -42,9 +42,6 @@ outputs:
   summary:
     description: Terminal agent summary.
     value: ${{ steps.run.outputs.summary }}
-  findings:
-    description: Terminal findings reference.
-    value: ${{ steps.run.outputs.findings }}
   cost-usd:
     description: Terminal raw inference cost in USD.
     value: ${{ steps.run.outputs.cost-usd }}

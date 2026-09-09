@@ -9,7 +9,7 @@ native vocabulary — `on:`, `needs:`, `if:`, `strategy.matrix`,
 `concurrency:`. Macroscope is the execution backend: the `run` action starts
 an agent (defined as markdown under
 `.macroscope/check-run-agents/github-actions/` in your repo), holds the run
-open, and reports its verdict and findings as step outputs. The workflow job
+open, and reports its verdict, summary, and cost as step outputs. The workflow job
 is itself the check — there is no Macroscope-owned check run on this path —
 so branch protection reads your job's conclusion directly, and any event is a
 valid trigger: `pull_request`, `push`, `schedule`, `release`,
@@ -131,7 +131,6 @@ jobs:
 | `run-id` | Durable Macroscope run ID. Written once start succeeds. |
 | `verdict` | Terminal verdict: `success`, `neutral`, or `failure`. |
 | `summary` | Terminal agent summary. |
-| `findings` | Terminal findings reference. |
 | `cost-usd` | Raw inference cost rendered as USD. |
 
 ## Runtime behavior
