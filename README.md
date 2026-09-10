@@ -11,9 +11,15 @@ an agent (defined as markdown under
 `.macroscope/check-run-agents/github-actions/` in your repo), holds the run
 open, and reports its verdict, summary, and cost as step outputs. The workflow job
 is itself the check — there is no Macroscope-owned check run on this path —
-so branch protection reads your job's conclusion directly, and any event is a
-valid trigger: `pull_request`, `push`, `schedule`, `release`,
-`workflow_dispatch`, `workflow_run`.
+so branch protection reads your job's conclusion directly. Supported triggers
+include `pull_request`, `push`, `schedule`, `release`, and `workflow_dispatch`,
+subject to the repository trust policy described below.
+
+Macroscope rejects `workflow_run` because the triggering workflow's provenance
+is not authenticated; run the agent in the source workflow instead, using
+`needs:` to sequence it after other jobs. It also rejects `pull_request_target`
+because it may execute untrusted code with base-repository authority; use
+`pull_request` instead.
 
 The `run` action is the supported workflow entry point. It mints GitHub OIDC,
 starts or rejoins one durable Macroscope run, polls until the server returns a
