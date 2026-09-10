@@ -42,9 +42,6 @@ outputs:
   summary:
     description: Terminal agent summary.
     value: ${{ steps.run.outputs.summary }}
-  cost-usd:
-    description: Terminal raw inference cost in USD.
-    value: ${{ steps.run.outputs.cost-usd }}
 runs:
   using: composite
   steps:
@@ -63,3 +60,10 @@ runs:
         IN_POLL_INTERVAL: "5"
         IN_ACTION_VERSION: v1
       run: ${{ github.action_path }}/run.sh
+    - name: Upload Macroscope result
+      if: ${{ always() && steps.run.outputs.result-path != '' }}
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      with:
+        name: ${{ steps.run.outputs.result-artifact-name }}
+        path: ${{ steps.run.outputs.result-path }}
+        if-no-files-found: error

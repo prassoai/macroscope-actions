@@ -5,9 +5,11 @@ setup() {
   source "${BATS_TEST_DIRNAME}/run.sh"
   eval "$(declare -f mock_action_http_request | sed '1s/mock_action_http_request/action_http_request/')"
   GITHUB_OUTPUT="$(mktemp)"
+  GITHUB_STEP_SUMMARY="$(mktemp)"
+  RUNNER_TEMP="$(mktemp -d)"
   MOCK_CALLS="$(mktemp)"
   MOCK_INDEX_FILE="$(mktemp)"
-  export GITHUB_OUTPUT MOCK_CALLS MOCK_INDEX_FILE
+  export GITHUB_OUTPUT GITHUB_STEP_SUMMARY RUNNER_TEMP MOCK_CALLS MOCK_INDEX_FILE
   IN_API_URL=https://hooks.example.test
   IN_REPOSITORY=prassoai/woofiors
   IN_AGENT="Release Audit"
@@ -32,6 +34,8 @@ setup() {
 
 teardown() {
   rm -f "$GITHUB_OUTPUT" "$MOCK_CALLS" "$MOCK_INDEX_FILE"
+  rm -f "$GITHUB_STEP_SUMMARY"
+  rm -rf "$RUNNER_TEMP"
 }
 
 enqueue_response() {
@@ -87,9 +91,170 @@ failure_body() {
   printf '{"status":"succeeded","verdict":"failure","summary":"Found issues","findingsReference":"artifact://findings","rawCostCentimills":200000}'
 }
 
+result_path() {
+  sed -n '/^result-path<</{n;p;}' "$GITHUB_OUTPUT"
+}
+
+# Requirement: positive Agent Credits retain exact ledger precision, including
+# small and large values, across the job summary and v1 artifact. They are not
+# raw inference cost and are published even when verdict gating fails.
+@test "recorded Agent Credits reach terminal summaries and result artifacts" {
+  for credits in 0.001 3.579 9223372036854775.807; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    : >"$GITHUB_OUTPUT"
+    : >"$GITHUB_STEP_SUMMARY"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    enqueue_response 200 "$(oidc_body)"
+    enqueue_response 202 "$(start_body)"
+    enqueue_response 200 "$(failure_body | jq --arg credits "$credits" '.agentCredits = $credits')"
+
+    run run_action
+
+    [ "$status" -eq 1 ]
+    grep -Fq "Agent Credits: $credits" "$GITHUB_STEP_SUMMARY"
+    jq -e --arg runId "$(run_id)" --arg credits "$credits" '. == {
+      schemaVersion: 1, runId: $runId, status: "succeeded", reason: null,
+      verdict: "failure", summary: "Found issues", agentCredits: $credits
+    }' "$(result_path)"
+    [ -z "$(grep -Ei 'cost|USD|unavailable' "$GITHUB_STEP_SUMMARY" "$GITHUB_OUTPUT" || true)" ]
+  done
+}
+
+# Requirement: zero recorded usage reads as customer-facing billing status,
+# not a decimal charge, while the machine-readable artifact retains exact data.
+@test "zero recorded credits display Not billed without changing the artifact" {
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body | jq '.agentCredits = "0.000"')"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  grep -Fxq -- '- Agent Credits: Not billed' "$GITHUB_STEP_SUMMARY"
+  [ -z "$(grep -F '0.000' "$GITHUB_STEP_SUMMARY" || true)" ]
+  jq -e '.agentCredits == "0.000"' "$(result_path)"
+}
+
+# Requirement: credits are absent only when usage was not recorded. Null or
+# malformed present values violate the initial contract and must fail closed.
+@test "malformed recorded Agent Credits do not publish terminal results" {
+  for credits in null '1' '""' '"-1.000"' '"1.23"' '"01.000"' '"<script>"' '{}' 'true'; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    : >"$GITHUB_OUTPUT"
+    : >"$GITHUB_STEP_SUMMARY"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    enqueue_response 200 "$(oidc_body)"
+    enqueue_response 202 "$(start_body)"
+    enqueue_response 200 "$(success_body | jq --argjson credits "$credits" '.agentCredits = $credits')"
+
+    run run_action
+
+    [ "$status" -eq 1 ]
+    [ -z "$(result_path)" ]
+    [ ! -s "$GITHUB_STEP_SUMMARY" ]
+  done
+}
+
+# Requirement: terminal reports append without replacing another action's
+# summary and preserve terminal data without publishing internal findings.
+@test "terminal success appends summary and persists a versioned result" {
+  printf 'Earlier step\n' >"$GITHUB_STEP_SUMMARY"
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body)"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  [ "$(head -1 "$GITHUB_STEP_SUMMARY")" = 'Earlier step' ]
+  grep -q 'Agent verdict: success' "$GITHUB_STEP_SUMMARY"
+  grep -q "Run ID: $(run_id)" "$GITHUB_STEP_SUMMARY"
+  [ -z "$(grep -Ei 'cost|credit|USD' "$GITHUB_STEP_SUMMARY" || true)" ]
+  grep -q 'Clean' "$GITHUB_STEP_SUMMARY"
+  grep -q 'ship it' "$GITHUB_STEP_SUMMARY"
+  jq -e --arg runId "$(run_id)" '. == {
+    schemaVersion: 1, runId: $runId, status: "succeeded", reason: null,
+    verdict: "success", summary: "Clean\nship it"
+  }' "$(result_path)"
+  [ "$(basename "$(result_path)")" = result.json ]
+  [[ "$(sed -n 's/^result-artifact-name=//p' "$GITHUB_OUTPUT")" == "macroscope-result-$(run_id)-"* ]]
+  [ "$(find "$(dirname "$(result_path)")" -type f | wc -l)" -eq 1 ]
+}
+
+# Requirement: all valid terminal outcomes publish evidence before fail-on
+# gating, including absent verdicts on failed and cancelled runs.
+@test "failure neutral and cancellation persist reports before gating" {
+  for terminal in \
+    '{"status":"succeeded","verdict":"failure"}' \
+    '{"status":"succeeded","verdict":"neutral"}' \
+    '{"status":"failed","reason":"Execution failed"}' \
+    '{"status":"cancelled","reason":"Lease expired"}'; do
+    for policy in failure neutral never; do
+      printf '0' >"$MOCK_INDEX_FILE"
+      : >"$GITHUB_OUTPUT"
+      MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+      IN_FAIL_ON=$policy
+      enqueue_response 200 "$(oidc_body)"
+      enqueue_response 202 "$(start_body)"
+      enqueue_response 200 "$terminal"
+
+      run run_action
+
+      if [ "$policy" = never ] || { [ "$policy" = failure ] && [ "$(jq -r .verdict <<<"$terminal")" = neutral ]; }; then
+        [ "$status" -eq 0 ]
+      else
+        [ "$status" -eq 1 ]
+      fi
+      jq -e --argjson terminal "$terminal" '.status == $terminal.status and .verdict == $terminal.verdict and .reason == $terminal.reason' "$(result_path)"
+    done
+  done
+}
+
+# Requirement: untrusted summaries remain readable text, not injected HTML,
+# and their original contents survive JSON serialization losslessly.
+@test "terminal summary escapes HTML and preserves JSON content" {
+  local summary=$'<script>bad()</script>\n</pre>\n```\n"quoted" & text\n'
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body | jq --arg summary "$summary" '.summary = $summary | .jobToken = "secret" | .unexpected = {internal: true}')"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  grep -q '&lt;script&gt;bad()&lt;/script&gt;' "$GITHUB_STEP_SUMMARY"
+  ! grep -q '<script>' "$GITHUB_STEP_SUMMARY"
+  jq -e --arg summary "$summary" '.summary == $summary' "$(result_path)"
+  jq -e 'has("jobToken") or has("unexpected") or has("findingsReference") | not' "$(result_path)"
+}
+
+# Requirement: separate invocations cannot overwrite each other's local
+# artifacts, even if an idempotent start returns the same durable run.
+@test "result files do not collide across invocations" {
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body)"
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(failure_body)"
+
+  run run_action
+  [ "$status" -eq 0 ]
+  local first
+  first=$(result_path)
+  local first_name
+  first_name=$(sed -n 's/^result-artifact-name=//p' "$GITHUB_OUTPUT")
+  : >"$GITHUB_OUTPUT"
+  run run_action
+  [ "$status" -eq 1 ]
+  [ "$first" != "$(result_path)" ]
+  [ "$first_name" != "$(sed -n 's/^result-artifact-name=//p' "$GITHUB_OUTPUT")" ]
+  jq -e '.verdict == "success"' "$first"
+  jq -e '.verdict == "failure"' "$(result_path)"
+}
+
 # Requirement: a successful terminal run emits every public output after a
 # lease-renewing poll.
-@test "terminal success emits run ID verdict summary and cost without findings" {
+@test "terminal success emits run ID verdict and summary without cost or findings" {
   enqueue_response 200 "$(oidc_body)"
   enqueue_response 202 "$(start_body)"
   enqueue_response 202 "$(running_body)" $'Retry-After: 0\r\n'
@@ -100,7 +265,7 @@ failure_body() {
   [ "$status" -eq 0 ]
   grep -q '^run-id=123e4567-e89b-12d3-a456-426614174000$' "$GITHUB_OUTPUT"
   grep -q '^verdict=success$' "$GITHUB_OUTPUT"
-  grep -q '^cost-usd=1.23456$' "$GITHUB_OUTPUT"
+  [ -z "$(grep '^cost-usd=' "$GITHUB_OUTPUT" || true)" ]
   grep -q 'summary<<ghadelim_' "$GITHUB_OUTPUT"
   ! grep -q '^findings' "$GITHUB_OUTPUT"
 }
@@ -113,9 +278,10 @@ failure_body() {
     printf '%s' "$body" > "$MOCK_CALLS"
     run valid_poll_response "$MOCK_CALLS"
     [ "$status" -eq 0 ]
-    run emit_terminal_outputs "$MOCK_CALLS"
+    run emit_terminal_outputs "$MOCK_CALLS" "$(run_id)"
     [ "$status" -eq 0 ]
     ! grep -q '^findings' "$GITHUB_OUTPUT"
+    jq -e 'has("findingsReference") | not' "$(result_path | tail -1)"
   done
 }
 
@@ -161,7 +327,7 @@ failure_body() {
   [ "$status" -eq 1 ]
   grep -q '^run-id=123e4567-e89b-12d3-a456-426614174000$' "$GITHUB_OUTPUT"
   grep -q '^verdict=failure$' "$GITHUB_OUTPUT"
-  grep -q '^cost-usd=2.00000$' "$GITHUB_OUTPUT"
+  [ -z "$(grep '^cost-usd=' "$GITHUB_OUTPUT" || true)" ]
 }
 
 # Requirement: fail-on never makes a terminal failed verdict observable without
@@ -191,6 +357,9 @@ failure_body() {
   [ "$status" -eq 1 ]
   grep -q '^run-id=' "$GITHUB_OUTPUT"
   ! grep -q '^verdict=' "$GITHUB_OUTPUT"
+  [ -z "$(result_path)" ]
+  [ ! -s "$GITHUB_STEP_SUMMARY" ]
+  [ -z "$(find "$RUNNER_TEMP" -type f)" ]
 }
 
 # Requirement: a timeout while minting OIDC is terminal even under fail-on
@@ -265,12 +434,15 @@ failure_body() {
 @test "malformed poll response fails closed" {
   enqueue_response 200 "$(oidc_body)"
   enqueue_response 202 "$(start_body)"
-  enqueue_response 200 '{"status":"succeeded","verdict":"success"}'
+  enqueue_response 200 '{"status":"succeeded","verdict":"success","summary":{}}'
 
   run run_action
 
   [ "$status" -eq 1 ]
   ! grep -q '^verdict=' "$GITHUB_OUTPUT"
+  [ -z "$(result_path)" ]
+  [ ! -s "$GITHUB_STEP_SUMMARY" ]
+  [ -z "$(find "$RUNNER_TEMP" -type f)" ]
 }
 
 # Requirement: a succeeded terminal response with an unknown verdict is
@@ -286,21 +458,50 @@ failure_body() {
   grep -q '^run-id=' "$GITHUB_OUTPUT"
   ! grep -q '^verdict=' "$GITHUB_OUTPUT"
   ! grep -q '^cost-usd=' "$GITHUB_OUTPUT"
+  [ -z "$(result_path)" ]
+  [ ! -s "$GITHUB_STEP_SUMMARY" ]
+  [ -z "$(find "$RUNNER_TEMP" -type f)" ]
 }
 
-# Requirement: cost conversion failures are detected before any terminal
-# output is written, so consumers never see a partial terminal result.
-@test "oversized terminal cost emits no terminal outputs" {
-  enqueue_response 200 "$(oidc_body)"
-  enqueue_response 202 "$(start_body)"
-  enqueue_response 200 '{"status":"succeeded","verdict":"success","summary":"ok","findingsReference":"[]","rawCostCentimills":1000000000}'
+# Requirement: internal metering is neither an action input dependency nor a
+# customer-facing result; absent, oversized, or differently typed values must
+# not affect polling, verdicts, summaries, or the allowlisted artifact schema.
+@test "internal cost fields are ignored throughout polling and publication" {
+  for cost in '{}' '{"rawCostCentimills":0}' '{"rawCostCentimills":1000000000}' \
+    '{"rawCostCentimills":null}' '{"rawCostCentimills":-1}' \
+    '{"rawCostCentimills":"internal"}' '{"rawCostCentimills":{"internal":true}}' \
+    '{"rawCostCentimills":1.5,"costUsd":"internal"}'; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    : >"$GITHUB_OUTPUT"
+    : >"$GITHUB_STEP_SUMMARY"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    enqueue_response 200 "$(oidc_body)"
+    enqueue_response 202 "$(start_body)"
+    enqueue_response 202 "$(jq '. + {status: "running"}' <<<"$cost")" $'Retry-After: 0\r\n'
+    enqueue_response 200 "$(jq '. + {status: "succeeded", verdict: "success", summary: "Clean"}' <<<"$cost")"
 
-  run run_action
+    run run_action
 
-  [ "$status" -eq 1 ]
-  grep -q '^run-id=' "$GITHUB_OUTPUT"
-  ! grep -q '^verdict=' "$GITHUB_OUTPUT"
-  ! grep -q '^cost-usd=' "$GITHUB_OUTPUT"
+    [ "$status" -eq 0 ]
+    grep -q '^verdict=success$' "$GITHUB_OUTPUT"
+    [ -z "$(grep -Ei 'cost|credit|USD' "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" || true)" ]
+    jq -e --arg runId "$(run_id)" '. == {
+      schemaVersion: 1, runId: $runId, status: "succeeded", reason: null,
+      verdict: "success", summary: "Clean"
+    }' "$(result_path)"
+  done
+}
+
+# Requirement: missing runner report destinations fail before creating a run,
+# rather than silently discarding the promised summary or artifact.
+@test "missing runner report destinations fail before requests" {
+  for variable in RUNNER_TEMP GITHUB_STEP_SUMMARY GITHUB_OUTPUT; do
+    run bash -c 'unset "$1"; source "$2"; run_action' -- "$variable" "${BATS_TEST_DIRNAME}/run.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"$variable is required"* ]]
+    [ ! -s "$MOCK_CALLS" ]
+  done
 }
 
 # Requirement: oversized additional-instructions is rejected locally before

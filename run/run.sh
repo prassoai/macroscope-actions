@@ -177,10 +177,10 @@ valid_poll_response() {
   jq -e '
     type == "object"
     and (.status | type == "string")
-    and (.rawCostCentimills | type == "number" and . >= 0 and floor == .)
     and ((.reason | type == "string") or (.reason == null))
     and ((.verdict | type == "string") or (.verdict == null))
     and ((.summary | type == "string") or (.summary == null))
+    and ((has("agentCredits") | not) or (.agentCredits | type == "string" and test("^(0|[1-9][0-9]*)\\.[0-9]{3}$")))
     and ((.status != "succeeded") or (.verdict == "success" or .verdict == "neutral" or .verdict == "failure"))
   ' "$1" >/dev/null
 }
@@ -204,17 +204,36 @@ poll_run() {
   done
 }
 
-cost_usd() {
-  validate_uint rawCostCentimills "$1" >/dev/null || return 1
-  printf '%d.%05d' "$((10#$1 / 100000))" "$((10#$1 % 100000))"
+emit_terminal_outputs() {
+  local body=$1
+  emit_scalar verdict "$(jq -r '.verdict // ""' "$body")" || return 1
+  emit_multiline summary "$(jq -r '.summary // ""' "$body")" || return 1
+  publish_terminal_result "$body" "$2"
 }
 
-emit_terminal_outputs() {
-  local body=$1 cost
-  cost=$(cost_usd "$(jq -r '.rawCostCentimills' "$body")") || return 1
-  emit_scalar verdict "$(jq -r '.verdict // ""' "$body")"
-  emit_multiline summary "$(jq -r '.summary // ""' "$body")"
-  emit_scalar cost-usd "$cost"
+publish_terminal_result() {
+  local body=$1 run_id=$2 directory
+  directory=$(mktemp -d "${RUNNER_TEMP}/macroscope-result-${run_id}-XXXXXX") || return 1
+  jq --arg runId "$run_id" '{
+    schemaVersion: 1,
+    runId: $runId,
+    status,
+    reason: (.reason // null),
+    verdict: (.verdict // null),
+    summary: (.summary // null)
+  } + (if has("agentCredits") then {agentCredits} else {} end)' "$body" >"$directory/result.json" || return 1
+  emit_multiline result-path "$directory/result.json" || return 1
+  emit_scalar result-artifact-name "${directory##*/}" || return 1
+  jq -r '
+    "\n## Macroscope result\n",
+    "- Agent verdict: \((.verdict // "unavailable") | @html)",
+    "- Run status: \(.status)",
+    (if has("agentCredits") then "- Agent Credits: \(.agentCredits | if . == "0.000" then "Not billed" else . end)" else empty end),
+    "- Run ID: \(.runId)\n",
+    "### Summary\n",
+    "<pre>\((.summary // "No agent summary returned.") | @html)</pre>",
+    (if .reason == null then empty else "\n### Reason\n\n<pre>\(.reason | @html)</pre>" end)
+  ' "$directory/result.json" >>"$GITHUB_STEP_SUMMARY"
 }
 
 conclude_run() {
@@ -237,6 +256,9 @@ conclude_run() {
 validate_run_inputs() {
   local command
   for command in curl jq openssl; do require_action_command "$command" || return 1; done
+  [ -n "${RUNNER_TEMP:-}" ] || { action_error "RUNNER_TEMP is required"; return 1; }
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] || { action_error "GITHUB_STEP_SUMMARY is required"; return 1; }
+  [ -n "${GITHUB_OUTPUT:-}" ] || { action_error "GITHUB_OUTPUT is required"; return 1; }
   [ -n "${IN_API_URL:-}" ] || { action_error "api-url is required"; return 1; }
   case "$IN_API_URL" in https://*) ;; *) action_error "api-url must use HTTPS"; return 1 ;; esac
   [ -n "${IN_REPOSITORY:-}" ] || { action_error "repository is required"; return 1; }
@@ -278,7 +300,7 @@ run_action() {
   else
     case $? in 124) unmet_exit "$IN_FAIL_ON" "Timed out while waiting for the Macroscope agent run." ;; *) return 1 ;; esac
   fi
-  emit_terminal_outputs "$RUN_ACTION_TMP/poll.json" || { action_error "Macroscope returned invalid output values"; return 1; }
+  emit_terminal_outputs "$RUN_ACTION_TMP/poll.json" "$run_id" || { action_error "Could not publish the Macroscope terminal result"; return 1; }
   conclude_run "$RUN_ACTION_TMP/poll.json"
 }
 

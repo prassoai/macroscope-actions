@@ -9,7 +9,7 @@ native vocabulary — `on:`, `needs:`, `if:`, `strategy.matrix`,
 `concurrency:`. Macroscope is the execution backend: the `run` action starts
 an agent (defined as markdown under
 `.macroscope/check-run-agents/github-actions/` in your repo), holds the run
-open, and reports its verdict, summary, and cost as step outputs. The workflow job
+open, and reports its run ID, verdict, and summary as step outputs. The workflow job
 is itself the check — there is no Macroscope-owned check run on this path —
 so branch protection reads your job's conclusion directly. Supported triggers
 include `pull_request`, `push`, `schedule`, `release`, and `workflow_dispatch`,
@@ -23,7 +23,8 @@ because it may execute untrusted code with base-repository authority; use
 
 The `run` action is the supported workflow entry point. It mints GitHub OIDC,
 starts or rejoins one durable Macroscope run, polls until the server returns a
-terminal result, and writes the result as step outputs.
+terminal result, and writes the result as step outputs, a job summary, and a
+downloadable JSON result artifact.
 
 ## Governance
 
@@ -137,7 +138,48 @@ jobs:
 | `run-id` | Durable Macroscope run ID. Written once start succeeds. |
 | `verdict` | Terminal verdict: `success`, `neutral`, or `failure`. |
 | `summary` | Terminal agent summary. |
-| `cost-usd` | Raw inference cost rendered as USD. |
+
+## Job summary and result artifact
+
+Every valid terminal result appends a Macroscope section to
+`$GITHUB_STEP_SUMMARY`: agent verdict, run status, run ID, summary, and a
+reason when provided, plus Agent Credits or **Not billed**. Existing
+summary content is preserved. Agent text is
+HTML-escaped and displayed as preformatted
+text, not interpreted as HTML or Markdown.
+
+The action uploads `result.json` in an artifact named
+`macroscope-result-<run-id>-<unique-suffix>`. The durable Macroscope run ID
+provides correlation; a per-invocation suffix prevents collisions when a run
+is rejoined. Download it from the workflow run's **Artifacts** section.
+Retention follows the repository's artifact retention policy.
+
+The version 1 JSON contract is:
+
+```json
+{
+  "schemaVersion": 1,
+  "runId": "123e4567-e89b-12d3-a456-426614174000",
+  "status": "succeeded",
+  "reason": null,
+  "verdict": "success",
+  "summary": "Clean\nship it",
+  "agentCredits": "3.579"
+}
+```
+
+`status` is `succeeded`, `failed`, or `cancelled`; absent `reason`, `verdict`,
+and `summary` are represented as JSON `null`. Consumers should check
+`schemaVersion` before reading the result. `agentCredits` is an exact decimal
+string. Runs with no credits charged display **Not billed** in the job summary;
+the artifact records zero credits.
+
+This is a **terminal result artifact, not a canonical structured findings
+list**. It contains only the documented fields, never internal
+`findingsReference` values, arbitrary API fields, or authentication tokens.
+It retains the original summary text in JSON without rendering it. Anyone
+with access to the workflow summary or artifact can read the agent's result;
+apply the same care to prompts and summaries as to workflow logs.
 
 ## Runtime behavior
 
@@ -150,8 +192,13 @@ action retries transport failures, server errors, `429`, and rate-limited
 `fail-on` maps the terminal result to the step exit status. `failure` fails
 only on a failed or absent verdict, `neutral` also fails on neutral, and
 `never` leaves the step green for agent outcomes and timeouts. Terminal outputs
-are written before any fail-on failure so `if: always()` consumers can inspect
-the result.
+and the job summary are written before any fail-on failure. The artifact upload
+uses `always()` when a result file exists, so a failing verdict does not skip
+it or turn the failed action green. `if: always()` consumers can still inspect
+the existing outputs. Upload errors fail the action independently of `fail-on`.
+Timeouts, transport failures, and malformed responses do not fabricate a
+terminal summary or artifact; `run-id` remains available if start succeeded.
+Hard cancellation or runner loss can prevent publication or upload.
 
 ## Versioning / pinning
 
@@ -160,9 +207,13 @@ with a trailing `# v1.x.y` comment for readability. A mutable tag (`@v1`,
 `@main`) lets a retagged upstream run attacker-controlled code inside a job
 that can mint an OIDC token; an immutable SHA cannot move under you.
 
-There is no container image anywhere in these actions — the payload is
-`curl`, `jq`, and `openssl` (for random output delimiters), all present on
-every GitHub-hosted runner — so a SHA pin covers the entire code path.
+There is no container image in these actions. The run script uses `curl`,
+`jq`, and `openssl` (for random output delimiters). Result upload delegates
+to a full-SHA-pinned `actions/upload-artifact` v6, which uses Node.js 24;
+self-hosted runners require Actions Runner 2.327.1 or newer and access to
+GitHub's artifact service. This uploader does not support GitHub Enterprise
+Server (GHES).
+No additional `GITHUB_TOKEN` permission is needed for the upload.
 
 ## License
 
