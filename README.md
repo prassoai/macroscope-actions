@@ -121,7 +121,7 @@ jobs:
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `api-url` | no | `https://hooks.macroscope.com` | HTTPS Macroscope control plane URL. |
+| `api-url` | no | `https://actions.macroscope.com` | HTTPS Macroscope control plane URL. |
 | `repository` | yes | | Repository in `owner/name` form; must match GitHub OIDC claims. |
 | `agent` | yes | | Agent title under `.macroscope/check-run-agents/github-actions/`. |
 | `commit` | no | `${{ github.sha }}` | Target commit SHA. |

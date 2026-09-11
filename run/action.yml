@@ -4,7 +4,7 @@ inputs:
   api-url:
     description: Macroscope HTTPS API base URL.
     required: false
-    default: https://hooks.macroscope.com
+    default: https://actions.macroscope.com
   repository:
     description: GitHub repository in owner/name form.
     required: true

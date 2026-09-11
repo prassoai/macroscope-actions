@@ -155,6 +155,21 @@ result_path() {
   done
 }
 
+# Requirement: the published default starts and polls runs on the Actions
+# endpoint, not the Query Agent webhook endpoint.
+@test "metadata default sends agent runs to actions.macroscope.com" {
+  IN_API_URL=$(ruby -ryaml -e 'puts YAML.load_file(ARGV.fetch(0)).fetch("inputs").fetch("api-url").fetch("default")' "${BATS_TEST_DIRNAME}/action.yml")
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body)"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  grep -Fxq 'POST https://actions.macroscope.com/api/v1/github-actions/agent-runs' "$MOCK_CALLS"
+  grep -Fxq "GET https://actions.macroscope.com/api/v1/github-actions/agent-runs/$(run_id)" "$MOCK_CALLS"
+}
+
 # Requirement: terminal reports append without replacing another action's
 # summary and preserve terminal data without publishing internal findings.
 @test "terminal success appends summary and persists a versioned result" {
