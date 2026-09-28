@@ -201,7 +201,7 @@ result_path() {
 @test "failure neutral and cancellation persist reports before gating" {
   for terminal in \
     '{"status":"succeeded","verdict":"failure"}' \
-    '{"status":"succeeded","verdict":"neutral"}' \
+    '{"status":"succeeded","verdict":"neutral","reason":"Budget reached","summary":"Findings may be incomplete."}' \
     '{"status":"failed","reason":"Execution failed"}' \
     '{"status":"cancelled","reason":"Lease expired"}'; do
     for policy in failure neutral never; do
@@ -220,7 +220,7 @@ result_path() {
       else
         [ "$status" -eq 1 ]
       fi
-      jq -e --argjson terminal "$terminal" '.status == $terminal.status and .verdict == $terminal.verdict and .reason == $terminal.reason' "$(result_path)"
+      jq -e --argjson terminal "$terminal" '.status == $terminal.status and .verdict == $terminal.verdict and .reason == $terminal.reason and .summary == $terminal.summary' "$(result_path)"
     done
   done
 }
