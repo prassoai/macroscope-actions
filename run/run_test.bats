@@ -552,3 +552,155 @@ result_path() {
   [ "$status" -eq 1 ]
   [ ! -s "$MOCK_CALLS" ]
 }
+
+# Requirement: isolated authentication, permission, and lookup failures must not
+# stop lease renewal; a successful response ends the bounded grace period.
+@test "polling recovers from transient 4xx and reports request IDs" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 401 '{"error":"invalid job token"}' $'X-Request-ID: first\r\n'
+  enqueue_response 403 '{"error":"permission denied"}' $'x-request-id: second\r\n'
+  enqueue_response 404 '{"error":"run not found"}' $'X-Macroscope-Request-Id: third\r\n'
+  enqueue_response 200 "$(success_body)"
+  run run_action
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HTTP 401: invalid job token; request ID: first"* ]]
+  [[ "$output" == *"HTTP 403: permission denied; request ID: second"* ]]
+  [[ "$output" == *"HTTP 404: run not found; request ID: third"* ]]
+}
+
+# Requirement: repeated transient 4xx failures consume one wall-clock grace
+# budget, even when network/server failures occur between them.
+@test "polling grace ends after forty seconds with the last error" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  enqueue_response 401 '{"error":"invalid job token"}'
+  enqueue_response 503 '{"error":"busy"}' '' 0 20
+  enqueue_response 404 '{"error":"run not found"}' '' 0 10
+  check_grace() {
+    local before=$SECONDS result=0
+    poll_run "$(run_id)" "$(jwt)" "$RUNNER_TEMP/body" "$RUNNER_TEMP/headers" "$RUNNER_TEMP/config" "$((SECONDS + 300))" || result=$?
+    [ "$result" -eq 1 ] || return 1
+    [ "$((SECONDS - before))" -ge 40 ] || return 1
+    [ "$((SECONDS - before))" -le 42 ]
+  }
+  run check_grace
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MOCK_INDEX_FILE")" -eq 3 ]
+  [[ "$output" == *"::error::Macroscope poll HTTP 404: run not found"* ]]
+}
+
+# Requirement: expiry is terminal regardless of rate-limit headers; retrying
+# cannot restore an expired token or an expired lease.
+@test "polling token and lease expiry never retry" {
+  for response in '403 job_token_expired' '409 lease_expired'; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    enqueue_response "${response%% *}" "{\"reason\":\"${response#* }\"}" $'x-ratelimit-remaining: 0\r\n'
+    run poll_run "$(run_id)" "$(jwt)" "$RUNNER_TEMP/body" "$RUNNER_TEMP/headers" "$RUNNER_TEMP/config" "$((SECONDS + 300))"
+    [ "$status" -eq 1 ]
+    [ "$(cat "$MOCK_INDEX_FILE")" -eq 1 ]
+    [[ "$output" == *"HTTP ${response%% *}"*"${response#* }"* ]]
+  done
+}
+
+# Requirement: recovery resets the grace budget, allowing unrelated intermittent
+# failures later in the run without changing the start POST's retry policy.
+@test "successful pending poll resets transient grace" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  IN_TIMEOUT=300
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 401 '{"error":"invalid token"}'
+  enqueue_response 202 "$(running_body)" '' 0 25
+  enqueue_response 404 '{"error":"run not found"}' '' 0 25
+  enqueue_response 200 "$(success_body)"
+  run run_action
+  [ "$status" -eq 0 ]
+}
+
+# Requirement: poll-only recovery cannot replay a rejected creation request.
+@test "start still fails immediately on 401" {
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 401 '{"error":"invalid token"}'
+  run run_action
+  [ "$status" -eq 1 ]
+  [ "$(cat "$MOCK_INDEX_FILE")" -eq 2 ]
+}
+
+# Requirement: a Retry-After longer than the grace budget cannot keep a
+# rejected poll alive indefinitely or hide its last HTTP error as a timeout.
+@test "poll grace bounds rate limit retry after" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  enqueue_response 401 '{"error":"invalid token"}'
+  enqueue_response 429 '{"error":"slow down"}' $'Retry-After: 120\r\nX-Request-ID: limited\r\n'
+  run poll_run "$(run_id)" "$(jwt)" "$RUNNER_TEMP/body" "$RUNNER_TEMP/headers" "$RUNNER_TEMP/config" "$((SECONDS + 300))"
+  [ "$status" -eq 1 ]
+  [ "$(cat "$MOCK_INDEX_FILE")" -eq 2 ]
+  [[ "$output" == *"HTTP 401: invalid token"* ]]
+  [[ "$output" == *"::error::Macroscope poll HTTP 429: slow down; request ID: limited"* ]]
+}
+
+# Requirement: the first rejected request's transfer consumes the same grace
+# budget as retries, keeping total recovery time below the polling lease.
+@test "first rejected transfer counts toward the forty second grace" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  enqueue_response 401 '{"error":"invalid token"}' '' 0 30
+  enqueue_response 404 '{"error":"run not found"}' '' 0 5
+  enqueue_response 200 "$(success_body)"
+  check_transfer_budget() {
+    local before=$SECONDS result=0
+    poll_run "$(run_id)" "$(jwt)" "$RUNNER_TEMP/body" "$RUNNER_TEMP/headers" "$RUNNER_TEMP/config" "$((SECONDS + 300))" || result=$?
+    [ "$result" -eq 1 ] || return 1
+    [ "$((SECONDS - before))" -ge 40 ] || return 1
+    [ "$((SECONDS - before))" -le 42 ]
+  }
+  run check_transfer_budget
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MOCK_INDEX_FILE")" -eq 2 ]
+}
+
+# Requirement: the action-wide timeout retains fail-on behavior when it limits
+# 4xx recovery, including Retry-After, transfer expiry, and equal deadlines.
+@test "global timeout during transient poll recovery respects fail-on" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  for scenario in sleep request retry_after tie; do
+    for policy in never failure; do
+      printf '0' >"$MOCK_INDEX_FILE"
+      MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+      IN_FAIL_ON=$policy
+      IN_TIMEOUT=10
+      [ "$scenario" != tie ] || IN_TIMEOUT=40
+      enqueue_response 200 "$(oidc_body)"
+      enqueue_response 202 "$(start_body)"
+      case "$scenario" in
+        sleep) enqueue_response 401 '{"error":"invalid token"}' '' 0 5 ;;
+        request)
+          enqueue_response 404 '{"error":"run not found"}'
+          enqueue_response 000 '' '' 124 5 ;;
+        retry_after) enqueue_response 403 '{"error":"permission denied"}' $'Retry-After: 120\r\n' ;;
+        tie) enqueue_response 401 '{"error":"invalid token"}' $'Retry-After: 40\r\n' ;;
+      esac
+      run run_action
+      if [ "$policy" = never ]; then
+        [ "$status" -eq 0 ]
+        [[ "$output" == *"::warning::Timed out while waiting for the Macroscope agent run."* ]]
+      else
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"::error::Timed out while waiting for the Macroscope agent run."* ]]
+      fi
+    done
+  done
+}
+
+# Requirement: a long normal poll interval must still allow recovery attempts
+# within the transient authentication grace period.
+@test "long poll interval still retries transient rejection" {
+  sleep() { SECONDS=$((SECONDS + $1)); }
+  IN_POLL_INTERVAL=60
+  enqueue_response 401 '{"error":"invalid token"}'
+  enqueue_response 200 "$(success_body)"
+  run poll_run "$(run_id)" "$(jwt)" "$RUNNER_TEMP/body" "$RUNNER_TEMP/headers" "$RUNNER_TEMP/config" "$((SECONDS + 300))"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MOCK_INDEX_FILE")" -eq 2 ]
+}

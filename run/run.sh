@@ -185,11 +185,82 @@ valid_poll_response() {
   ' "$1" >/dev/null
 }
 
+# Authentication and lookup failures share a 40-second grace budget. Transfer
+# time and all intervening retries count toward it; a successful poll resets it.
+# Keep the grace endpoint separate from the action timeout so the limiting
+# deadline selects the exit policy; the action timeout wins a tie.
+poll_request_or_retry() {
+  local url=$1 output=$2 headers=$3 config=$4 deadline=$5
+  local grace_deadline=0 request_deadline retryable last_error request_status retry_headers reason request_id attempt_start retry_interval
+  while :; do
+    request_deadline=$deadline
+    if [ "$grace_deadline" -ne 0 ] && [ "$grace_deadline" -lt "$deadline" ]; then
+      [ "$SECONDS" -lt "$grace_deadline" ] || { action_error "$last_error"; return 1; }
+      request_deadline=$grace_deadline
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || return 124
+    # Clear response state so a transport failure cannot report a previous response.
+    : >"$output"
+    : >"$headers"
+    HTTP_STATUS=000
+    request_status=0
+    attempt_start=$SECONDS
+    action_http_request GET "$url" "" "$output" "$headers" "$config" "$request_deadline" || request_status=$?
+    if [ "$request_status" -eq 124 ]; then
+      if [ "$grace_deadline" -ne 0 ] && [ "$grace_deadline" -lt "$deadline" ] && [ "$SECONDS" -ge "$grace_deadline" ]; then
+        action_error "$last_error"; return 1
+      fi
+      return 124
+    fi
+    if [ "$request_status" -eq 0 ] && { [ "$HTTP_STATUS" = 200 ] || [ "$HTTP_STATUS" = 202 ]; }; then
+      return 0
+    fi
+    reason=$(jq -r '.reason // empty' "$output" 2>/dev/null || true)
+    last_error="Macroscope poll HTTP ${HTTP_STATUS}: $(api_error_message "$output" "${reason:-request failed (transport status ${request_status})}")"
+    request_id=$(awk '{ sub(/\r$/, ""); name=$0; sub(/:.*/, "", name); if (tolower(name) == "x-request-id" || tolower(name) == "x-macroscope-request-id") { sub(/^[^:]*:[[:space:]]*/, ""); print; exit } }' "$headers")
+    [ -z "$request_id" ] || last_error="$last_error; request ID: $request_id"
+    printf '%s\n' "$(strip_crlf "$last_error")" >&2
+    retryable=false
+    if [ "$request_status" -eq 75 ]; then
+      retryable=true
+    elif [ "$request_status" -eq 0 ]; then
+      case "$HTTP_STATUS" in
+        429 | 5??) retryable=true ;;
+        401 | 404) retryable=true; [ "$grace_deadline" -ne 0 ] || grace_deadline=$((attempt_start + 40)) ;;
+        403)
+          if [ "$reason" != job_token_expired ]; then
+            if rate_limited "$headers"; then
+              retryable=true
+            elif [ "$(jq -r '.error // .message // empty' "$output" 2>/dev/null)" = "permission denied" ]; then
+              retryable=true; [ "$grace_deadline" -ne 0 ] || grace_deadline=$((attempt_start + 40))
+            fi
+          fi ;;
+      esac
+    fi
+    "$retryable" || { action_error "$last_error"; return 1; }
+    request_deadline=$deadline
+    [ "$grace_deadline" -eq 0 ] || request_deadline=$(min_uint "$deadline" "$grace_deadline")
+    retry_headers=$headers
+    [ "$request_status" -ne 75 ] || retry_headers=/dev/null
+    retry_interval=$IN_POLL_INTERVAL
+    # A long normal polling interval must not consume the entire grace without
+    # a recovery attempt. Explicit Retry-After guidance still takes precedence.
+    [ "$grace_deadline" -eq 0 ] || retry_interval=$(min_uint "$retry_interval" 5)
+    IN_POLL_INTERVAL=$retry_interval sleep_for_retry "$retry_headers" "$request_deadline" || {
+      request_status=$?
+      if [ "$request_status" -eq 124 ] && [ "$grace_deadline" -ne 0 ] && [ "$grace_deadline" -lt "$deadline" ]; then
+        action_error "$last_error"; return 1
+      fi
+      return "$request_status"
+    }
+  done
+}
+
 poll_run() {
   local run_id=$1 token=$2 output=$3 headers=$4 config=$5 deadline=$6
   write_auth_config "$config" "$token" "$IN_ACTION_VERSION"
   while :; do
-    request_or_retry GET "$(url_join "$IN_API_URL" "/api/v1/github-actions/agent-runs/${run_id}")" "" "$output" "$headers" "$config" "$deadline" || return $?
+    poll_request_or_retry "$(url_join "$IN_API_URL" "/api/v1/github-actions/agent-runs/${run_id}")" "$output" "$headers" "$config" "$deadline" || return $?
     case "$HTTP_STATUS" in
       202)
         valid_poll_response "$output" || { action_error "Macroscope poll returned a malformed response"; return 1; }
@@ -199,7 +270,6 @@ poll_run() {
         valid_poll_response "$output" || { action_error "Macroscope poll returned a malformed response"; return 1; }
         case "$(jq -r '.status' "$output")" in succeeded | failed | cancelled) return 0 ;; *) action_error "Macroscope poll returned HTTP 200 with a nonterminal status"; return 1 ;; esac
         ;;
-      *) action_error "$(api_error_message "$output" "Macroscope poll returned HTTP ${HTTP_STATUS}")"; return 1 ;;
     esac
   done
 }
