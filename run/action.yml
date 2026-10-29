@@ -30,7 +30,7 @@ inputs:
     required: false
     default: "1800"
   additional-instructions:
-    description: Optional run-specific instructions appended to the agent prompt.
+    description: Optional CRA-only instructions appended to the agent prompt. Not supported for Approvability.
     required: false
 outputs:
   run-id:

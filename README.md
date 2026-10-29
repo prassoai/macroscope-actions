@@ -129,7 +129,7 @@ jobs:
 | `pull-request` | no | | Pull request number for PR metadata inputs and PR-scoped tools. |
 | `fail-on` | no | `failure` | `failure`, `neutral`, or `never`. |
 | `timeout` | no | `1800` | Maximum seconds to wait for a terminal result. |
-| `additional-instructions` | no | | Extra prompt text, capped at 16 KiB. |
+| `additional-instructions` | no | | CRA-only extra prompt text, capped at 16 KiB. Not supported for Approvability. |
 
 ## Outputs
 
