@@ -108,10 +108,14 @@ thread reconciliation follow the ordinary repository-policy rules.
 The run may approve the PR under ordinary Approvability policy. Preview and
 policy skips finish neutrally; a denied review may finish with `failure` according
 to the repository's conclusion policy. `fail-on` controls the workflow step's exit
-status, not whether Macroscope may approve. A stale/closed PR, cancelled invocation
-or expired polling lease cannot authorize a new approval. An approval validly
-posted before cancellation remains in place; cancellation is not a rollback of
-an in-flight GitHub request.
+status, not whether Macroscope may approve. Admission validates the requested PR
+and commits. After admission, PR freshness follows ordinary Approvability's
+webhook-derived state and targeted fallbacks, including its eventual-consistency
+windows. Internal invocation authority is separate: an expired polling lease or
+revoked invocation prevents new approvals. Stopping the GitHub job stops polling;
+authority can remain active until the lease expires. An approval validly posted
+before revocation remains in place; cancellation is not a rollback of an in-flight
+GitHub request.
 
 Scopes, child-analysis selection and runtime output schemas are not supported by
 this interface. HTTP `scopes` is rejected even when it is an empty array or null;
@@ -207,9 +211,10 @@ accepts the following ordinary Approvability body:
 ```
 
 The response remains `202` with `runId` and `jobToken`; poll with that job token
-using the existing lease-renewing endpoint. Admission is not a verdict: current
-PR metadata and native review policy are verified during execution. Existing
-HTTP requests with `agent` and no `review` remain CRA requests; explicit
+using the existing lease-renewing endpoint. Admission is not a verdict: PR identity
+and commits are validated once, then ordinary native PR state and review policy
+govern execution. Existing HTTP requests with `agent` and no `review` remain CRA
+requests; explicit
 `{"kind":"cra"}` also requires `agent`. Approvability rejects a nonempty `agent`.
 Reusing one invocation key for another review kind returns `409`; use a different
 discriminator for a separate review. Pending Approvability retries retain the
