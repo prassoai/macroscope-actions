@@ -44,7 +44,8 @@ join_json_members() {
 start_payload() {
   join_json_members \
     "$(json_member repository "$(json_string "$IN_REPOSITORY")")" \
-    "$(json_member agent "$(json_string "$IN_AGENT")")" \
+    "$(json_member review "$(join_json_members "$(json_member kind "$(json_string "$IN_REVIEW")")")")" \
+    "$(optional_string_member agent "${IN_AGENT:-}")" \
     "$(json_member commit "$(json_string "$IN_COMMIT")")" \
     "$(optional_string_member base "${IN_BASE:-}")" \
     "$(optional_uint_member pullRequest "${IN_PULL_REQUEST:-}")" \
@@ -332,8 +333,25 @@ validate_run_inputs() {
   [ -n "${IN_API_URL:-}" ] || { action_error "api-url is required"; return 1; }
   case "$IN_API_URL" in https://*) ;; *) action_error "api-url must use HTTPS"; return 1 ;; esac
   [ -n "${IN_REPOSITORY:-}" ] || { action_error "repository is required"; return 1; }
-  [ -n "${IN_AGENT:-}" ] || { action_error "agent is required"; return 1; }
-  [ -n "${IN_COMMIT:-}" ] || { action_error "commit is required"; return 1; }
+  case "${IN_REVIEW:-}" in
+    cra)
+      IN_COMMIT=${IN_COMMIT:-${GITHUB_SHA:-}}
+      [ -n "$IN_COMMIT" ] || { action_error "commit is required"; return 1; }
+      [ -n "${IN_AGENT:-}" ] || { action_error "agent is required for CRA reviews"; return 1; }
+      ;;
+    approvability)
+      IN_COMMIT=${IN_COMMIT:-${IN_PR_HEAD_COMMIT:-}}
+      [ -n "$IN_COMMIT" ] || { action_error "Approvability requires a PR head commit; set commit explicitly outside PR events"; return 1; }
+      [ -z "${IN_ADDITIONAL_INSTRUCTIONS:-}" ] || { action_error "Approvability does not support additional-instructions; configure repository approval policy instead"; return 1; }
+      [ -z "${IN_AGENT:-}" ] || { action_error "Approvability does not accept an agent; omit agent"; return 1; }
+      if [ -z "${IN_BASE:-}" ] || [ -z "${IN_PULL_REQUEST:-}" ]; then
+        action_error "Approvability requires base and pull-request"
+        return 1
+      fi
+      [[ "$IN_COMMIT" =~ ^[0-9a-fA-F]{40}$ && "$IN_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || { action_error "Approvability commit and base must be 40-character Git commit SHAs"; return 1; }
+      ;;
+    *) action_error "review must be cra or approvability"; return 1 ;;
+  esac
   validate_uint timeout "${IN_TIMEOUT:-}" || return 1
   [ "$IN_TIMEOUT" -gt 0 ] || { action_error "timeout must be greater than zero"; return 1; }
   validate_uint poll-interval "${IN_POLL_INTERVAL:-}" || return 1

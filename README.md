@@ -1,17 +1,18 @@
 # macroscope-actions
 
 Composite GitHub Actions for [Macroscope](https://macroscope.com) — run
-Macroscope agents from workflows you own.
+Macroscope reviews from workflows you own.
 
 **The model: your workflow owns the run.** Triggers, sequencing, retries,
 concurrency, cancellation, and the conclusion are all yours, in GitHub's
 native vocabulary — `on:`, `needs:`, `if:`, `strategy.matrix`,
 `concurrency:`. Macroscope is the execution backend: the `run` action starts
-an agent (defined as markdown under
-`.macroscope/check-run-agents/github-actions/` in your repo), holds the run
-open, and reports its run ID, verdict, and summary as step outputs. The workflow job
-is itself the check — there is no Macroscope-owned check run on this path —
-so branch protection reads your job's conclusion directly. Supported triggers
+a configured agent (defined as markdown under
+`.macroscope/check-run-agents/github-actions/` in your repo) or native Approvability,
+holds the invocation open, and reports its run ID, verdict, and summary as step outputs.
+For configured agents, the workflow job is the check; branch protection reads
+your job's conclusion directly. Approvability additionally publishes its native
+Macroscope check and may approve under ordinary repository policy. Supported triggers
 include `pull_request`, `push`, `schedule`, `release`, and `workflow_dispatch`,
 subject to the repository trust policy described below.
 
@@ -21,7 +22,8 @@ is not authenticated; run the agent in the source workflow instead, using
 because it may execute untrusted code with base-repository authority; use
 `pull_request` instead.
 
-The `run` action is the supported workflow entry point. It mints GitHub OIDC,
+The `run` action is the supported workflow entry point for a configured agent
+(`review: cra`, the default) or ordinary Approvability (`review: approvability`). It mints GitHub OIDC,
 starts or rejoins one durable Macroscope run, polls until the server returns a
 terminal result, and writes the result as step outputs, a job summary, and a
 downloadable JSON result artifact.
@@ -52,7 +54,7 @@ the integration in Macroscope settings.
 permissions:
   contents: read
   id-token: write       # REQUIRED: mints the OIDC token that authenticates to Macroscope
-  # no checks: scope — the job itself is the check run, concluded by GitHub
+  # no checks: scope — GitHub concludes the job; Macroscope owns its native checks
 ```
 
 A `permissions:` map is **closed** — every scope it does not list is revoked —
@@ -60,6 +62,62 @@ so `id-token: write` must be present. Without it the action fails immediately,
 naming the missing scope.
 
 ## Usage
+
+### Ordinary Approvability
+
+Select Approvability without an `agent`, and pass the PR number and its base SHA.
+`commit` defaults to `github.event.pull_request.head.sha`, not the synthetic merge
+commit in `github.sha`. Outside PR events, pass the current PR head SHA explicitly.
+Explicit `commit` values always take precedence. CRA reviews retain their
+`github.sha` default. The example pins the head explicitly for clarity.
+The server verifies the current open PR and runs native
+Approvability, including repository exclusions, deterministic gates, configured
+approval behavior, Preview Mode and ordinary pricing. It creates a GitHub check
+using the installed Macroscope app; the job needs no `checks: write` permission.
+
+```yaml
+name: Macroscope Approvability
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  approvability:
+    runs-on: ubuntu-latest
+    steps:
+      - id: macroscope
+        uses: prassoai/macroscope-actions/run@<sha> # v1
+        with:
+          repository: ${{ github.repository }}
+          review: approvability
+          commit: ${{ github.event.pull_request.head.sha }}
+          base: ${{ github.event.pull_request.base.sha }}
+          pull-request: ${{ github.event.pull_request.number }}
+```
+
+Actions selects when the standard Approvability assessment runs, not its approval
+policy. Configure that policy in `.macroscope/approvability.md`. Approvability does
+not support `additional-instructions`; nonempty values are rejected. CRA reviews
+continue to support invocation instructions. Approvability verdict caching and
+thread reconciliation follow the ordinary repository-policy rules.
+
+The run may approve the PR under ordinary Approvability policy. Preview and
+policy skips finish neutrally; a denied review may finish with `failure` according
+to the repository's conclusion policy. `fail-on` controls the workflow step's exit
+status, not whether Macroscope may approve. A stale/closed PR, cancelled invocation
+or expired polling lease cannot authorize a new approval. An approval validly
+posted before cancellation remains in place; cancellation is not a rollback of
+an in-flight GitHub request.
+
+Scopes, child-analysis selection and runtime output schemas are not supported by
+this interface. HTTP `scopes` is rejected even when it is an empty array or null;
+omit it for an ordinary review.
+
+### Configured agents
 
 Full-diff agents pass an explicit `base`:
 
@@ -123,13 +181,40 @@ jobs:
 | --- | --- | --- | --- |
 | `api-url` | no | `https://actions.macroscope.com` | HTTPS Macroscope control plane URL. |
 | `repository` | yes | | Repository in `owner/name` form; must match GitHub OIDC claims. |
-| `agent` | yes | | Agent title under `.macroscope/check-run-agents/github-actions/`. |
+| `review` | no | `cra` | `cra` for a configured agent; `approvability` for native ordinary Approvability. |
+| `agent` | CRA only | | Agent title under `.macroscope/check-run-agents/github-actions/`. Omit for Approvability. |
 | `commit` | no | `${{ github.sha }}` | Target commit SHA. |
-| `base` | no | | Base commit SHA for diff-shaped inputs. |
-| `pull-request` | no | | Pull request number for PR metadata inputs and PR-scoped tools. |
+| `base` | Approvability or diff input | | Explicit base commit SHA. |
+| `pull-request` | Approvability or PR metadata input | | Pull request number for PR metadata inputs and PR-scoped tools. |
 | `fail-on` | no | `failure` | `failure`, `neutral`, or `never`. |
 | `timeout` | no | `1800` | Maximum seconds to wait for a terminal result. |
-| `additional-instructions` | no | | CRA-only extra prompt text, capped at 16 KiB. Not supported for Approvability. |
+| `additional-instructions` | CRA only | | Extra prompt text, capped at 16 KiB (bytes). Approvability rejects nonempty instructions. |
+
+### HTTP selection
+
+The same OIDC-authenticated `POST /api/v1/github-actions/agent-runs` endpoint
+accepts the following ordinary Approvability body:
+
+```json
+{
+  "repository": "acme/widget",
+  "review": {"kind": "approvability"},
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "pullRequest": 42,
+  "idempotencyDiscriminator": "approvability-step"
+}
+```
+
+The response remains `202` with `runId` and `jobToken`; poll with that job token
+using the existing lease-renewing endpoint. Admission is not a verdict: current
+PR metadata and native review policy are verified during execution. Existing
+HTTP requests with `agent` and no `review` remain CRA requests; explicit
+`{"kind":"cra"}` also requires `agent`. Approvability rejects a nonempty `agent`.
+Reusing one invocation key for another review kind returns `409`; use a different
+discriminator for a separate review. Pending Approvability retries retain the
+original durable target; running retries reuse the same execution and polling
+scope. Polling fields and version-1 result artifacts remain unchanged.
 
 ## Outputs
 

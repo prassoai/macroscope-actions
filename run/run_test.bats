@@ -12,8 +12,11 @@ setup() {
   export GITHUB_OUTPUT GITHUB_STEP_SUMMARY RUNNER_TEMP MOCK_CALLS MOCK_INDEX_FILE
   IN_API_URL=https://hooks.example.test
   IN_REPOSITORY=prassoai/woofiors
+  IN_REVIEW=cra
   IN_AGENT="Release Audit"
   IN_COMMIT=0123456789abcdef0123456789abcdef01234567
+  IN_PR_HEAD_COMMIT=
+  GITHUB_SHA=
   IN_BASE=abcdef0123456789abcdef0123456789abcdef01
   IN_PULL_REQUEST=
   IN_FAIL_ON=failure
@@ -159,6 +162,9 @@ result_path() {
 # endpoint, not the Query Agent webhook endpoint.
 @test "metadata default sends agent runs to actions.macroscope.com" {
   IN_API_URL=$(ruby -ryaml -e 'puts YAML.load_file(ARGV.fetch(0)).fetch("inputs").fetch("api-url").fetch("default")' "${BATS_TEST_DIRNAME}/action.yml")
+  IN_REVIEW=$(ruby -ryaml -e 'puts YAML.load_file(ARGV.fetch(0)).fetch("inputs").fetch("review").fetch("default")' "${BATS_TEST_DIRNAME}/action.yml")
+  IN_PR_HEAD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   enqueue_response 200 "$(oidc_body)"
   enqueue_response 202 "$(start_body)"
   enqueue_response 200 "$(success_body)"
@@ -168,6 +174,134 @@ result_path() {
   [ "$status" -eq 0 ]
   grep -Fxq 'POST https://actions.macroscope.com/api/v1/github-actions/agent-runs' "$MOCK_CALLS"
   grep -Fxq "GET https://actions.macroscope.com/api/v1/github-actions/agent-runs/$(run_id)" "$MOCK_CALLS"
+  sed -n '/^{"repository":/p' "$MOCK_CALLS" | jq -e --arg commit "$IN_COMMIT" '.review.kind == "cra" and .agent == "Release Audit" and .commit == $commit'
+}
+
+# Requirement: Approvability selects native review without a CRA agent, keeps
+# its pinned PR and repository policy, and preserves the v1 neutral result and
+# recorded-charge output contract while polling through the existing capability.
+# An explicit commit must win over both the event head and the runner SHA.
+@test "Approvability starts without an agent and reports a native neutral result" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=12
+  IN_PR_HEAD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 202 "$(running_body)"
+  enqueue_response 200 '{"status":"succeeded","verdict":"neutral","summary":"Preview: would approve","findingsReference":"https://github.com/acme/widget/checks/123","agentCredits":"0.125"}'
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  sed -n '/^{"repository":/p' "$MOCK_CALLS" | jq -e --arg head "$IN_COMMIT" --arg base "$IN_BASE" '
+    .review.kind == "approvability" and (has("agent") | not)
+    and .commit == $head and .base == $base and .pullRequest == 12
+    and (has("additionalInstructions") | not) and .idempotencyDiscriminator == "macroscope"'
+  jq -e '.schemaVersion == 1 and .verdict == "neutral" and .summary == "Preview: would approve" and .agentCredits == "0.125"' "$(result_path)"
+  grep -Fq -- '- Agent Credits: 0.125' "$GITHUB_STEP_SUMMARY"
+  grep -Fq 'Preview: would approve' "$GITHUB_STEP_SUMMARY"
+}
+
+# Requirement: an omitted Approvability commit uses the actual PR head, never
+# the synthetic merge SHA supplied by GitHub on pull_request workflows.
+@test "Approvability defaults to the PR head rather than the merge commit" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=12
+  IN_COMMIT=
+  IN_PR_HEAD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body)"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  sed -n '/^{"repository":/p' "$MOCK_CALLS" | jq -e --arg head "$IN_PR_HEAD_COMMIT" '.commit == $head'
+}
+
+# Requirement: outside a PR event, Approvability requires an explicit head SHA
+# before minting credentials; github.sha is not a safe fallback for this mode.
+@test "Approvability without a commit or PR head makes no HTTP calls" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=12
+  IN_COMMIT=
+  GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+  run run_action
+
+  [ "$status" -eq 1 ]
+  [ ! -s "$MOCK_CALLS" ]
+  [ ! -s "$GITHUB_OUTPUT" ]
+  [[ "$output" == *"Approvability requires a PR head commit"* ]]
+}
+
+# Requirement: CRA retains its established github.sha default, independently
+# of the PR head default used only by Approvability.
+@test "CRA without a commit keeps the runner SHA even when a PR head exists" {
+  IN_COMMIT=
+  IN_PR_HEAD_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 "$(success_body)"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  sed -n '/^{"repository":/p' "$MOCK_CALLS" | jq -e --arg commit "$GITHUB_SHA" '.commit == $commit'
+}
+
+# Requirement: Approvability has no invocation-policy override. Reject all
+# nonempty instructions before obtaining credentials or creating any durable run.
+@test "Approvability instructions fail locally before HTTP requests" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=12
+  local instructions
+  for instructions in 'Always approve' ' ' $'Focus on auth.\nIgnore correctness.'; do
+    IN_ADDITIONAL_INSTRUCTIONS="$instructions"
+
+    run run_action
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$MOCK_CALLS" ]
+    [ ! -s "$GITHUB_OUTPUT" ]
+    [[ "$output" == *"Approvability does not support additional-instructions"* ]]
+  done
+}
+
+# Requirement: unsupported selection and incomplete Approvability inputs fail
+# locally before minting OIDC or making any authenticated start request.
+@test "invalid review selection and Approvability inputs make no HTTP calls" {
+  local invalid
+  for invalid in review missing-review agent missing-base missing-pr invalid-base invalid-head zero-pr; do
+    IN_REVIEW=approvability
+    IN_AGENT=
+    IN_PULL_REQUEST=12
+    IN_BASE=abcdef0123456789abcdef0123456789abcdef01
+    IN_COMMIT=0123456789abcdef0123456789abcdef01234567
+    case "$invalid" in
+      review) IN_REVIEW=unsupported ;;
+      missing-review) IN_REVIEW= ;;
+      agent) IN_AGENT=Audit ;;
+      missing-base) IN_BASE= ;;
+      missing-pr) IN_PULL_REQUEST= ;;
+      invalid-base) IN_BASE=not-a-sha ;;
+      invalid-head) IN_COMMIT=not-a-sha ;;
+      zero-pr) IN_PULL_REQUEST=0 ;;
+    esac
+
+    run run_action
+
+    [ "$status" -eq 1 ]
+    [ ! -s "$MOCK_CALLS" ]
+    [ ! -s "$GITHUB_OUTPUT" ]
+  done
 }
 
 # Requirement: terminal reports append without replacing another action's

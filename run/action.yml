@@ -1,5 +1,5 @@
 name: Macroscope Run
-description: Run one Macroscope GitHub Actions agent and expose its result.
+description: Run a Macroscope review and expose its result.
 inputs:
   api-url:
     description: Macroscope HTTPS API base URL.
@@ -8,18 +8,21 @@ inputs:
   repository:
     description: GitHub repository in owner/name form.
     required: true
-  agent:
-    description: Agent title under .macroscope/check-run-agents/github-actions/.
-    required: true
-  commit:
-    description: Target commit SHA.
+  review:
+    description: "Review kind: cra or approvability."
     required: false
-    default: ${{ github.sha }}
+    default: cra
+  agent:
+    description: Agent title under .macroscope/check-run-agents/github-actions/. Required for CRA; omit for Approvability.
+    required: false
+  commit:
+    description: Target commit SHA. Defaults to the event PR head for Approvability, or github.sha for CRA. Required for Approvability outside PR events.
+    required: false
   base:
-    description: Optional base commit SHA for diff inputs.
+    description: Base commit SHA. Required for Approvability and diff-shaped agents.
     required: false
   pull-request:
-    description: Optional pull request number for PR metadata inputs.
+    description: Pull request number. Required for Approvability and PR metadata agents.
     required: false
   fail-on:
     description: "Step failure policy: failure, neutral, or never."
@@ -50,8 +53,10 @@ runs:
       env:
         IN_API_URL: ${{ inputs.api-url }}
         IN_REPOSITORY: ${{ inputs.repository }}
+        IN_REVIEW: ${{ inputs.review }}
         IN_AGENT: ${{ inputs.agent }}
-        IN_COMMIT: ${{ inputs.commit || github.sha }}
+        IN_COMMIT: ${{ inputs.commit }}
+        IN_PR_HEAD_COMMIT: ${{ github.event.pull_request.head.sha }}
         IN_BASE: ${{ inputs.base }}
         IN_PULL_REQUEST: ${{ inputs.pull-request }}
         IN_FAIL_ON: ${{ inputs.fail-on }}
