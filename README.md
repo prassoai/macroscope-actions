@@ -117,9 +117,11 @@ authority can remain active until the lease expires. An approval validly posted
 before revocation remains in place; cancellation is not a rollback of an in-flight
 GitHub request.
 
-Scopes, child-analysis selection and runtime output schemas are not supported by
-this interface. HTTP `scopes` is rejected even when it is an empty array or null;
-omit it for an ordinary review.
+Scoped execution, child-analysis selection and runtime output schemas are not
+available through this interface; there is no `scopes-file` Action input yet.
+The HTTP API validates the scope request contract, but still rejects every scoped
+invocation before creating a run, including an empty array. Omit `scopes` for an
+ordinary review; `null` is invalid, not another spelling of omission.
 
 ### Configured agents
 
