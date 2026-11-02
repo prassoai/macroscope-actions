@@ -24,6 +24,7 @@ setup() {
   IN_POLL_INTERVAL=5
   IN_ACTION_VERSION=v1
   IN_ADDITIONAL_INSTRUCTIONS=
+  IN_SCOPES=
   GITHUB_ACTION=macroscope
   ACTIONS_ID_TOKEN_REQUEST_URL=https://token.actions.githubusercontent.com/request
   ACTIONS_ID_TOKEN_REQUEST_TOKEN=request-token
@@ -96,6 +97,52 @@ failure_body() {
 
 result_path() {
   sed -n '/^result-path<</{n;p;}' "$GITHUB_OUTPUT"
+}
+
+# Requirement: scoped results use v2 without changing ordinary v1 artifacts;
+# customer-supplied names cannot inject HTML into the job summary.
+@test "scoped Approvability produces a v2 artifact and escaped summary" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=7
+  IN_SCOPES='[{"name":"API <review>","checkName":"API check","analysis":"parent","files":["api/a.go"]}]'
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 200 '{"status":"succeeded","verdict":"success","summary":"Checks only","scopedReview":{"schemaVersion":2,"scopes":[{"name":"API <review>","conclusion":"success","publishedConclusion":"success","publicationStatus":"confirmed","checkRunId":102}],"parentSummary":{"publicationStatus":"confirmed","publishedConclusion":"neutral","checkRunId":101}}}'
+  run run_action
+  [ "$status" -eq 0 ]
+  jq -e '.schemaVersion == 2 and .scopedReview.scopes[0].name == "API <review>" and .scopedReview.scopes[0].checkRunId == 102 and .scopedReview.parentSummary.publishedConclusion == "neutral"' "$(result_path)"
+  grep -q 'API &lt;review&gt;' "$GITHUB_STEP_SUMMARY"
+  grep -q 'no pull-request approval' "$GITHUB_STEP_SUMMARY"
+}
+
+# Requirement: invalid scoped input stops before OIDC or network requests.
+@test "scoped input requires bounded Approvability JSON" {
+  IN_SCOPES='[]'
+  run validate_run_inputs
+  [ "$status" -ne 0 ]
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=7
+  for IN_SCOPES in '[]' '{}' '[{},{},{}]' 'not-json'; do
+    run validate_run_inputs
+    [ "$status" -ne 0 ]
+  done
+  [ ! -s "$MOCK_CALLS" ]
+}
+
+# Requirement: a scoped Action never reports success from missing, mismatched or
+# unacknowledged scope results, even if the top-level status claims success.
+@test "scoped polling rejects missing or unacknowledged results" {
+  IN_SCOPES='[{"name":"API"}]'
+  for body in \
+    '{"status":"succeeded","verdict":"success"}' \
+    '{"status":"succeeded","verdict":"success","scopedReview":{"schemaVersion":2,"scopes":[],"parentSummary":{}}}' \
+    '{"status":"succeeded","verdict":"success","scopedReview":{"schemaVersion":2,"scopes":[{"name":"API","conclusion":"success","publicationStatus":"uncertain"}],"parentSummary":{"publicationStatus":"pending"}}}'; do
+    printf '%s' "$body" >"$MOCK_CALLS"
+    run valid_poll_response "$MOCK_CALLS"
+    [ "$status" -ne 0 ]
+  done
 }
 
 # Requirement: positive Agent Credits retain exact ledger precision, including

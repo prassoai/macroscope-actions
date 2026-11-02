@@ -1,5 +1,9 @@
 # macroscope-actions
 
+## Scoped Approvability pilot
+
+Explicitly enabled repositories may pass `scopes` as a JSON array with one or two entries: `name`, `checkName`, `files` (1–1024 exact changed paths per scope), and `analysis: parent`. Names are 1–32 byte ASCII identifiers (letters, digits, `.`, `_`, `/`, `-`, starting with a letter or digit); check labels allow the same characters plus spaces, up to 64 bytes. Paths are capped at 256 bytes. Caller instructions and `responsible.users`/`responsible.teams` are unsupported in this pilot. Display check labels are not sent to the model. Use `review: approvability` with pinned `commit`, `base` and `pull-request`; omit `agent`. This is checks-only, never PR approval. Scoped artifacts use schemaVersion 2, including each immutable result and publication status/check identity; ordinary artifacts remain v1. See [deployment and smoke requirements](../docs/finished/approvability/scoped-parent-pilot.md).
+
 Composite GitHub Actions for [Macroscope](https://macroscope.com) — run
 Macroscope reviews from workflows you own.
 

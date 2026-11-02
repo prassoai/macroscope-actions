@@ -15,6 +15,9 @@ inputs:
   agent:
     description: Agent title under .macroscope/check-run-agents/github-actions/. Required for CRA; omit for Approvability.
     required: false
+  scopes:
+    description: JSON array of one or two parent-owned scopes. Requires the repository-scoped Approvability pilot.
+    required: false
   commit:
     description: Target commit SHA. Defaults to the event PR head for Approvability, or github.sha for CRA. Required for Approvability outside PR events.
     required: false
@@ -55,6 +58,7 @@ runs:
         IN_REPOSITORY: ${{ inputs.repository }}
         IN_REVIEW: ${{ inputs.review }}
         IN_AGENT: ${{ inputs.agent }}
+        IN_SCOPES: ${{ inputs.scopes }}
         IN_COMMIT: ${{ inputs.commit }}
         IN_PR_HEAD_COMMIT: ${{ github.event.pull_request.head.sha }}
         IN_BASE: ${{ inputs.base }}

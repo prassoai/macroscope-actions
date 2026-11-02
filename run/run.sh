@@ -46,6 +46,7 @@ start_payload() {
     "$(json_member repository "$(json_string "$IN_REPOSITORY")")" \
     "$(json_member review "$(join_json_members "$(json_member kind "$(json_string "$IN_REVIEW")")")")" \
     "$(optional_string_member agent "${IN_AGENT:-}")" \
+    "$(if [ -n "${IN_SCOPES:-}" ]; then json_member scopes "$IN_SCOPES"; fi)" \
     "$(json_member commit "$(json_string "$IN_COMMIT")")" \
     "$(optional_string_member base "${IN_BASE:-}")" \
     "$(optional_uint_member pullRequest "${IN_PULL_REQUEST:-}")" \
@@ -175,7 +176,12 @@ start_run() {
 }
 
 valid_poll_response() {
-  jq -e '
+  jq -e --argjson expected "${IN_SCOPES:-null}" '
+    def publication:
+      type == "object"
+      and (.publicationStatus == "pending" or .publicationStatus == "uncertain" or .publicationStatus == "confirmed")
+      and ((has("checkRunId") | not) or (.checkRunId | type == "number" and . > 0 and floor == .))
+      and ((has("publishedConclusion") | not) or (.publishedConclusion | type == "string"));
     type == "object"
     and (.status | type == "string")
     and ((.reason | type == "string") or (.reason == null))
@@ -183,6 +189,20 @@ valid_poll_response() {
     and ((.summary | type == "string") or (.summary == null))
     and ((has("agentCredits") | not) or (.agentCredits | type == "string" and test("^(0|[1-9][0-9]*)\\.[0-9]{3}$")))
     and ((.status != "succeeded") or (.verdict == "success" or .verdict == "neutral" or .verdict == "failure"))
+    and (if $expected == null then (has("scopedReview") | not) else
+      .scopedReview.schemaVersion == 2
+      and (.scopedReview.scopes | type == "array" and length == ($expected | length))
+      and ([.scopedReview.scopes[].name] | sort) == ([$expected[].name] | sort)
+      and all(.scopedReview.scopes[]; publication
+        and ((.conclusion == null) or (.conclusion == "success" or .conclusion == "failure" or .conclusion == "neutral"))
+        and ((.explanation == null) or (.explanation | type == "string"))
+        and ((.executionError == null) or (.executionError | type == "string")))
+      and (.scopedReview.parentSummary | publication)
+      and (if .status == "succeeded" then
+        all(.scopedReview.scopes[]; .publicationStatus == "confirmed" and .checkRunId > 0 and .conclusion != null and .publishedConclusion == .conclusion and .executionError == null)
+        and (.scopedReview.parentSummary | .publicationStatus == "confirmed" and .publishedConclusion == "neutral" and .checkRunId > 0)
+        else true end)
+      end)
   ' "$1" >/dev/null
 }
 
@@ -286,13 +306,14 @@ publish_terminal_result() {
   local body=$1 run_id=$2 directory
   directory=$(mktemp -d "${RUNNER_TEMP}/macroscope-result-${run_id}-XXXXXX") || return 1
   jq --arg runId "$run_id" '{
-    schemaVersion: 1,
+    schemaVersion: (if has("scopedReview") then 2 else 1 end),
     runId: $runId,
     status,
     reason: (.reason // null),
     verdict: (.verdict // null),
     summary: (.summary // null)
-  } + (if has("agentCredits") then {agentCredits} else {} end)' "$body" >"$directory/result.json" || return 1
+  } + (if has("agentCredits") then {agentCredits} else {} end)
+    + (if has("scopedReview") then {scopedReview} else {} end)' "$body" >"$directory/result.json" || return 1
   emit_multiline result-path "$directory/result.json" || return 1
   emit_scalar result-artifact-name "${directory##*/}" || return 1
   jq -r '
@@ -301,6 +322,7 @@ publish_terminal_result() {
     "- Run status: \(.status)",
     (if has("agentCredits") then "- Agent Credits: \(.agentCredits | if . == "0.000" then "Not billed" else . end)" else empty end),
     "- Run ID: \(.runId)\n",
+    (if has("scopedReview") then "### Scope results\n\n<table><thead><tr><th>Scope</th><th>Verdict</th><th>Delivery</th></tr></thead><tbody>", (.scopedReview.scopes[] | "<tr><td>\(.name | @html)</td><td>\((.conclusion // "unavailable") | @html)</td><td>\(.publicationStatus | @html)</td></tr>"), "</tbody></table>\n\nChecks only; no pull-request approval is issued.\n" else empty end),
     "### Summary\n",
     "<pre>\((.summary // "No agent summary returned.") | @html)</pre>",
     (if .reason == null then empty else "\n### Reason\n\n<pre>\(.reason | @html)</pre>" end)
@@ -333,6 +355,10 @@ validate_run_inputs() {
   [ -n "${IN_API_URL:-}" ] || { action_error "api-url is required"; return 1; }
   case "$IN_API_URL" in https://*) ;; *) action_error "api-url must use HTTPS"; return 1 ;; esac
   [ -n "${IN_REPOSITORY:-}" ] || { action_error "repository is required"; return 1; }
+  if [ -n "${IN_SCOPES:-}" ]; then
+    [ "${IN_REVIEW:-}" = approvability ] || { action_error "scopes require Approvability"; return 1; }
+    printf '%s' "$IN_SCOPES" | jq -e 'type == "array" and length >= 1 and length <= 2' >/dev/null || { action_error "scopes must be a JSON array of one or two scopes"; return 1; }
+  fi
   case "${IN_REVIEW:-}" in
     cra)
       IN_COMMIT=${IN_COMMIT:-${GITHUB_SHA:-}}
