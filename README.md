@@ -4,12 +4,12 @@
 
 Explicitly enabled repositories may pass `scopes` as a JSON array with one or two entries: `name`, `checkName`, `files` (1–1024 exact changed paths per scope), and `analysis: parent`. Names are 1–128 byte ASCII identifiers (letters, digits, `.`, `_`, `/`, `-`, starting with a letter or digit); check labels allow the same characters plus spaces, up to 255 bytes so they also fit GitHub output titles. Names and check labels are preserved exactly, without shortening or adding a prefix. Paths are capped at 256 bytes. Caller instructions and `responsible.users`/`responsible.teams` are unsupported in this pilot. Display check labels are not sent to the model. Use `review: approvability` with pinned `commit`, `base` and `pull-request`; omit `agent`. This is checks-only, never PR approval. Scoped artifacts use schemaVersion 2, including each immutable result and publication status/check identity; ordinary artifacts remain v1. See [deployment and smoke requirements](../docs/finished/approvability/scoped-parent-pilot.md).
 
-For example, these identifiers are accepted unchanged:
+For example, these fictional identifiers are accepted unchanged:
 
 ```json
 {
-  "name": "trust-intelligence-behavioral-detection-small-medium-tests",
-  "checkName": "Macroscope - Approvability Check - trust-intelligence-behavioral-detection-small-medium-tests"
+  "name": "example-inventory-processing-service-integration-tests",
+  "checkName": "Macroscope - Approvability Check - example-inventory-processing-service-integration-tests"
 }
 ```
 
