@@ -87,6 +87,10 @@ running_body() {
   printf '{"status":"running","rawCostCentimills":0}'
 }
 
+scoped_running_body() {
+  jq -nc --argjson scopes "$IN_SCOPES" '{status: "running", scopedReview: {schemaVersion: 2, scopes: [$scopes[] | {name, publicationStatus: "pending"}], parentSummary: {publicationStatus: "pending"}}}'
+}
+
 success_body() {
   printf '{"status":"succeeded","verdict":"success","summary":"Clean\\nship it","findingsReference":"[]","rawCostCentimills":123456}'
 }
@@ -124,11 +128,101 @@ result_path() {
   IN_REVIEW=approvability
   IN_AGENT=
   IN_PULL_REQUEST=7
-  for IN_SCOPES in '[]' '{}' '[{},{},{}]' 'not-json'; do
+  for IN_SCOPES in '[]' '{}' "$(jq -nc '[range(251) | {}]')" "$(jq -nc '[range(676) | {}]')" 'not-json'; do
     run validate_run_inputs
     [ "$status" -ne 0 ]
+    [[ "$output" == *"1–250"* ]]
+  done
+  for count in 249 250; do
+    IN_SCOPES=$(jq -nc --argjson count "$count" '[range($count) | {name: "scope-\(.)", checkName: "Check \(.)", analysis: "parent", files: ["shared.go"]}]')
+    run validate_run_inputs
+    [ "$status" -eq 0 ]
   done
   [ ! -s "$MOCK_CALLS" ]
+}
+
+# Requirement: N parent scopes survive request creation, polling, v2 artifacts
+# and rendered summaries; losing even one scope still rejects terminal success.
+@test "N parent scopes retain every mixed result through the Action" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=7
+  IN_FAIL_ON=never
+  for count in 3 32 250; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    : >"$GITHUB_OUTPUT"
+    : >"$GITHUB_STEP_SUMMARY"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    IN_SCOPES=$(jq -nc --argjson count "$count" '[range($count) | {name: "scope-\(.)", checkName: "Check \(.)", analysis: "parent", files: ["shared.go"]}]')
+    start_payload | jq -e --argjson expected "$IN_SCOPES" '.scopes == $expected'
+    enqueue_response 200 "$(oidc_body)"
+    enqueue_response 202 "$(start_body)"
+    enqueue_response 200 "$(jq -nc --argjson scopes "$IN_SCOPES" '{status: "succeeded", verdict: "failure", scopedReview: {schemaVersion: 2, scopes: [$scopes | to_entries[] | .key as $index | {name: .value.name, conclusion: (["success", "failure", "neutral"][$index % 3]), publishedConclusion: (["success", "failure", "neutral"][$index % 3]), publicationStatus: "confirmed", checkRunId: ($index + 102)}], parentSummary: {publicationStatus: "confirmed", publishedConclusion: "neutral", checkRunId: 101}}}')"
+    run run_action
+    [ "$status" -eq 0 ]
+    jq -e --argjson expected "$IN_SCOPES" '.schemaVersion == 2 and ([.scopedReview.scopes[].name] | sort) == ([$expected[].name] | sort) and all(.scopedReview.scopes[]; .conclusion == .publishedConclusion and .publicationStatus == "confirmed") and ([.scopedReview.scopes[].conclusion] == [range($expected | length) | ["success", "failure", "neutral"][. % 3]])' "$(result_path)"
+    for ((index = 0; index < count; index++)); do
+      grep -Fq "<tr><td>scope-$index</td><td>" "$GITHUB_STEP_SUMMARY"
+    done
+    jq 'del(.scopedReview.scopes[-1])' "$(result_path)" >"$MOCK_CALLS"
+    run valid_poll_response "$MOCK_CALLS"
+    [ "$status" -ne 0 ]
+  done
+}
+
+# Requirement: the configured default keeps even the largest scoped review
+# polling for the full two-hour backend run plus terminal-delivery headroom.
+@test "default timeout covers the full scoped backend run" {
+  IN_REVIEW=approvability
+  IN_AGENT=
+  IN_PULL_REQUEST=7
+  IN_POLL_INTERVAL=0
+  IN_TIMEOUT=$(ruby -ryaml -e 'puts YAML.load_file(ARGV.fetch(0)).fetch("inputs").fetch("timeout").fetch("default")' "$BATS_TEST_DIRNAME/action.yml")
+  IN_SCOPES=$(jq -nc '[range(250) | {name: "scope-\(.)", checkName: "Check \(.)", analysis: "parent", files: ["shared.go"]}]')
+  enqueue_response 200 "$(oidc_body)"
+  enqueue_response 202 "$(start_body)"
+  enqueue_response 202 "$(scoped_running_body)" "" 0 7200
+  enqueue_response 200 "$(jq -nc --argjson scopes "$IN_SCOPES" '{status: "succeeded", verdict: "success", scopedReview: {schemaVersion: 2, scopes: [$scopes | to_entries[] | {name: .value.name, conclusion: "success", publishedConclusion: "success", publicationStatus: "confirmed", checkRunId: (.key + 102)}], parentSummary: {publicationStatus: "confirmed", publishedConclusion: "neutral", checkRunId: 101}}}')"
+
+  run run_action
+
+  [ "$status" -eq 0 ]
+  grep -q '^verdict=success$' "$GITHUB_OUTPUT"
+  jq -e '.scopedReview.scopes | length == 250' "$(result_path)"
+}
+
+# Requirement: increasing the scoped default must not extend ordinary reviews
+# or override an explicit caller timeout, even for the largest scope set.
+@test "ordinary defaults and explicit scoped timeouts stay bounded" {
+  for mode in ordinary scoped; do
+    printf '0' >"$MOCK_INDEX_FILE"
+    : >"$GITHUB_OUTPUT"
+    MOCK_STATUS=(); MOCK_BODY=(); MOCK_HEADERS=(); MOCK_EXIT=(); MOCK_ADVANCE=()
+    if [ "$mode" = ordinary ]; then
+      IN_TIMEOUT=$(ruby -ryaml -e 'puts YAML.load_file(ARGV.fetch(0)).fetch("inputs").fetch("timeout").fetch("default")' "$BATS_TEST_DIRNAME/action.yml")
+      elapsed=1800
+      pending=$(running_body)
+    else
+      IN_REVIEW=approvability
+      IN_AGENT=
+      IN_PULL_REQUEST=7
+      IN_SCOPES=$(jq -nc '[range(250) | {name: "scope-\(.)", checkName: "Check \(.)", analysis: "parent", files: ["shared.go"]}]')
+      IN_TIMEOUT=60
+      elapsed=60
+      pending=$(scoped_running_body)
+    fi
+    enqueue_response 200 "$(oidc_body)"
+    enqueue_response 202 "$(start_body)"
+    enqueue_response 202 "$pending" "" 0 "$elapsed"
+
+    run run_action
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Timed out"* ]]
+    grep -q '^run-id=' "$GITHUB_OUTPUT"
+    ! grep -q '^verdict=' "$GITHUB_OUTPUT"
+    [ -z "$(result_path)" ]
+  done
 }
 
 # Requirement: a scoped Action never reports success from missing, mismatched or

@@ -16,7 +16,7 @@ inputs:
     description: Agent title under .macroscope/check-run-agents/github-actions/. Required for CRA; omit for Approvability.
     required: false
   scopes:
-    description: JSON array of one or two parent-owned scopes. Requires the repository-scoped Approvability pilot.
+    description: JSON array of 1–250 applicable parent-owned scopes per PR invocation. Requires the repository-scoped Approvability pilot.
     required: false
   commit:
     description: Target commit SHA. Defaults to the event PR head for Approvability, or github.sha for CRA. Required for Approvability outside PR events.
@@ -32,9 +32,9 @@ inputs:
     required: false
     default: failure
   timeout:
-    description: Maximum seconds to wait for a terminal Macroscope result.
+    description: "Maximum seconds to wait for a terminal Macroscope result, or auto (1800 seconds ordinarily, 7800 seconds with scopes)."
     required: false
-    default: "1800"
+    default: auto
   additional-instructions:
     description: Optional CRA-only instructions appended to the agent prompt. Not supported for Approvability.
     required: false

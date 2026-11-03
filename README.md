@@ -2,7 +2,7 @@
 
 ## Scoped Approvability pilot
 
-Explicitly enabled repositories may pass `scopes` as a JSON array with one or two entries: `name`, `checkName`, `files` (1–1024 exact changed paths per scope), and `analysis: parent`. Names are 1–128 byte ASCII identifiers (letters, digits, `.`, `_`, `/`, `-`, starting with a letter or digit); check labels allow the same characters plus spaces, up to 255 bytes so they also fit GitHub output titles. Names and check labels are preserved exactly, without shortening or adding a prefix. Paths are capped at 256 bytes. Caller instructions and `responsible.users`/`responsible.teams` are unsupported in this pilot. Display check labels are not sent to the model. Use `review: approvability` with pinned `commit`, `base` and `pull-request`; omit `agent`. This is checks-only, never PR approval. Scoped artifacts use schemaVersion 2, including each immutable result and publication status/check identity; ordinary artifacts remain v1. See [deployment and smoke requirements](../docs/finished/approvability/scoped-parent-pilot.md).
+Explicitly enabled repositories may pass `scopes` as a JSON array of 1–250 applicable parent-owned scopes per PR invocation. This limits the submitted scope set, not the total scope definitions in a customer's repository. Each entry supplies `name`, `checkName`, `files` (1–1024 exact changed paths per scope), and `analysis: parent`. Names are 1–128 byte ASCII identifiers (letters, digits, `.`, `_`, `/`, `-`, starting with a letter or digit); check labels allow the same characters plus spaces, up to 255 bytes so they also fit GitHub output titles. Names and check labels are preserved exactly, without shortening or adding a prefix. Paths are capped at 256 bytes. Caller instructions are unsupported. Optional `responsible.users`/`responsible.teams` supply literal context, not verified ownership or reviewer routing; their existing limits include an 8192-byte identity budget shared across all scopes. Display check labels are not sent to the model. Use `review: approvability` with pinned `commit`, `base` and `pull-request`; omit `agent`. This is checks-only, never PR approval. Scoped artifacts use schemaVersion 2, including each immutable result and publication status/check identity; ordinary artifacts remain v1. Existing invocation timeouts and model/context budgets still apply to the whole scope set. See [deployment and smoke requirements](../docs/finished/approvability/scoped-parent-pilot.md).
 
 For example, these fictional identifiers are accepted unchanged:
 
@@ -130,11 +130,10 @@ authority can remain active until the lease expires. An approval validly posted
 before revocation remains in place; cancellation is not a rollback of an in-flight
 GitHub request.
 
-Scoped execution, child-analysis selection and runtime output schemas are not
-available through this interface; there is no `scopes-file` Action input yet.
-The HTTP API validates the scope request contract, but still rejects every scoped
-invocation before creating a run, including an empty array. Omit `scopes` for an
-ordinary review; `null` is invalid, not another spelling of omission.
+Parent-only scoped execution is available only to explicitly enabled repositories;
+child-analysis selection and runtime output schemas remain unsupported. There is
+no `scopes-file` Action input yet. Omit `scopes` for an ordinary review; an empty
+array or `null` is invalid, not another spelling of omission.
 
 ### Configured agents
 
@@ -196,6 +195,12 @@ jobs:
 
 ## Inputs
 
+Scoped requests also have a 512 KiB aggregate budget for the complete encoded
+definition, including JSON escaping and whitespace headroom, independently of
+the 1–250 applicable scopes per invocation and per-scope limits. Oversize requests are rejected before
+run creation with a transport-budget error; nothing is truncated. Reduce total
+scope paths or metadata to fit.
+
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `api-url` | no | `https://actions.macroscope.com` | HTTPS Macroscope control plane URL. |
@@ -206,7 +211,7 @@ jobs:
 | `base` | Approvability or diff input | | Explicit base commit SHA. |
 | `pull-request` | Approvability or PR metadata input | | Pull request number for PR metadata inputs and PR-scoped tools. |
 | `fail-on` | no | `failure` | `failure`, `neutral`, or `never`. |
-| `timeout` | no | `1800` | Maximum seconds to wait for a terminal result. |
+| `timeout` | no | `auto` | Maximum seconds to wait, or `auto`: 1800 seconds ordinarily; 7800 seconds with `scopes`. |
 | `additional-instructions` | CRA only | | Extra prompt text, capped at 16 KiB (bytes). Approvability rejects nonempty instructions. |
 
 ### HTTP selection
@@ -293,6 +298,13 @@ Polling is the execution lease. While the backend reports `pending` or
 runner dies, polling stops and Macroscope lapses the run server-side. The
 action retries transport failures, server errors, `429`, and rate-limited
 `403` responses within the remaining timeout budget.
+
+The default `timeout: auto` allows scoped reviews 7,800 seconds (two hours plus
+ten minutes for terminal delivery), covering serial check creation within the
+backend's two-hour invocation limit. Ordinary reviews retain their 1,800-second
+default. An explicit numeric timeout remains an exact caller-selected limit;
+a shorter limit can stop polling before the review finishes. The enclosing
+GitHub Actions job or step timeout must also allow the chosen duration.
 
 `fail-on` maps the terminal result to the step exit status. `failure` fails
 only on a failed or absent verdict, `neutral` also fails on neutral, and

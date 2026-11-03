@@ -357,7 +357,7 @@ validate_run_inputs() {
   [ -n "${IN_REPOSITORY:-}" ] || { action_error "repository is required"; return 1; }
   if [ -n "${IN_SCOPES:-}" ]; then
     [ "${IN_REVIEW:-}" = approvability ] || { action_error "scopes require Approvability"; return 1; }
-    printf '%s' "$IN_SCOPES" | jq -e 'type == "array" and length >= 1 and length <= 2' >/dev/null || { action_error "scopes must be a JSON array of one or two scopes"; return 1; }
+    printf '%s' "$IN_SCOPES" | jq -e 'type == "array" and length >= 1 and length <= 250' >/dev/null || { action_error "scopes must be a JSON array of 1–250 applicable parent-owned scopes per PR invocation"; return 1; }
   fi
   case "${IN_REVIEW:-}" in
     cra)
@@ -378,6 +378,9 @@ validate_run_inputs() {
       ;;
     *) action_error "review must be cra or approvability"; return 1 ;;
   esac
+  if [ "${IN_TIMEOUT:-}" = auto ]; then
+    if [ -n "${IN_SCOPES:-}" ]; then IN_TIMEOUT=7800; else IN_TIMEOUT=1800; fi
+  fi
   validate_uint timeout "${IN_TIMEOUT:-}" || return 1
   [ "$IN_TIMEOUT" -gt 0 ] || { action_error "timeout must be greater than zero"; return 1; }
   validate_uint poll-interval "${IN_POLL_INTERVAL:-}" || return 1
