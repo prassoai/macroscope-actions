@@ -20,9 +20,10 @@ fails the job.
 
 Supported triggers include `pull_request`, `push`, `schedule`, `release`, and
 `workflow_dispatch`. GitHub must allow the job to obtain an OIDC token; do not
-assume this is available to fork pull requests. `pull_request_target` and
-`workflow_run` are rejected. Use `pull_request` for PR reviews, and `needs:` to
-run a review after another job in the same workflow.
+assume this is available to fork pull requests. `pull_request_target` is
+accepted only in private or internal repositories; in a public repository any
+fork can trigger it. `workflow_run` is rejected. Use `pull_request` for PR
+reviews, and `needs:` to run a review after another job in the same workflow.
 
 Replace `<sha>` in each example with a full commit SHA from
 `prassoai/macroscope-actions`. Pin to that SHA rather than a moving branch or tag.
