@@ -41,6 +41,7 @@ name: Macroscope Approvability
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -59,6 +60,13 @@ jobs:
           base: ${{ github.event.pull_request.base.sha }}
           pull-request: ${{ github.event.pull_request.number }}
 ```
+
+The `edited` trigger re-runs the review when the PR's base branch changes.
+Retargeting a PR changes its diff but not its head commit, so without it the
+earlier result would keep satisfying a required check. Title and description
+edits also re-run the review. Do not filter them out with a job `if`: GitHub
+reports a skipped job as a passing required check, so a skipped run would
+replace a failed review on the same commit.
 
 No checkout step is needed: Macroscope reads the repository through its GitHub
 app. The PR must be open and its head and base must match the supplied SHAs.
@@ -85,6 +93,7 @@ name: Macroscope Scoped Review
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -162,6 +171,7 @@ name: Macroscope Release Audit
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
